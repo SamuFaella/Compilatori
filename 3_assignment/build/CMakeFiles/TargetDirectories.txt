@@ -1,0 +1,9 @@
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/intrinsics_gen.dir
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/omp_gen.dir
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/acc_gen.dir
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/ARMTargetParserTableGen.dir
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/AArch64TargetParserTableGen.dir
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/RISCVTargetParserTableGen.dir
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/LoopInvariantCodeMotionPass.dir
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/edit_cache.dir
+/home/samu/Laboratori_Compilatori/3_assignment/build/CMakeFiles/rebuild_cache.dir
