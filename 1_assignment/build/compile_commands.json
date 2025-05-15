@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/samu/Laboratori_Compilatori/1_assignment/build",
+  "command": "/usr/bin/c++ -DOptimizationPass_EXPORTS -isystem /home/samu/LLVM-19.1.7-Linux-X64/include  -fno-rtti -std=gnu++17 -fPIC   -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -o CMakeFiles/OptimizationPass.dir/OptimizationPass.cpp.o -c /home/samu/Laboratori_Compilatori/1_assignment/OptimizationPass.cpp",
+  "file": "/home/samu/Laboratori_Compilatori/1_assignment/OptimizationPass.cpp",
+  "output": "CMakeFiles/OptimizationPass.dir/OptimizationPass.cpp.o"
+}
+]

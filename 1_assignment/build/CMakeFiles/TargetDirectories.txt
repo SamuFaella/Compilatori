@@ -1,0 +1,9 @@
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/intrinsics_gen.dir
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/omp_gen.dir
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/acc_gen.dir
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/ARMTargetParserTableGen.dir
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/AArch64TargetParserTableGen.dir
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/RISCVTargetParserTableGen.dir
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/OptimizationPass.dir
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/edit_cache.dir
+/home/samu/Laboratori_Compilatori/1_assignment/build/CMakeFiles/rebuild_cache.dir
