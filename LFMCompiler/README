@@ -1,0 +1,4 @@
+Versione che costruisce e (opzionalmente) visita
+gli alberi della Abstract Syntax Forest. Può
+anche produrre una versione latex che permette di visualizzare
+gli alberi in modo più efficace
