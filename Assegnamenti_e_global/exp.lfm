@@ -1,0 +1,17 @@
+function exp(x y v) 
+   if y==0 : v;
+      true : let 
+                b = y%2,
+                y = y/2,
+                z = x*x
+             in
+                if b==1 : exp(z,y,x*v);
+                   true : exp(z,y,v)
+                end
+             end
+   end
+end
+function main()
+   exp(3,5,1)
+end              
+                    
