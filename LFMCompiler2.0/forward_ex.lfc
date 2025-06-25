@@ -1,0 +1,17 @@
+external IN(verbose)
+external OUT(x)
+forward f(x)
+function main()
+    let y = IN(0),
+        z = f(y)
+        in OUT(if z>0 :2*z-1;
+                true:2*z+1
+               end
+               )
+    end
+end
+function f(x)
+    if x>3:3;
+       true:x
+    end
+end

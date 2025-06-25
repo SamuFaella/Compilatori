@@ -1,0 +1,20 @@
+external IN()
+external OUT(x)
+
+function f(x y)
+    let 
+    g = lambda(x)
+        if x>0: x-1;
+           true: 1-x;
+        end
+    in g(x)+g(y)+g(x*y)
+    end
+end
+
+function main()
+    let 
+        x = IN(),
+        y = IN()
+    in OUT(f(x,y))
+    end
+end
