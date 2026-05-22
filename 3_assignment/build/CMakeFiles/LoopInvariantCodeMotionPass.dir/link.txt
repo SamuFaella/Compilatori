@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC  -fno-rtti -shared -Wl,-soname,libLoopInvariantCodeMotionPass.so -o libLoopInvariantCodeMotionPass.so CMakeFiles/LoopInvariantCodeMotionPass.dir/LoopInvariantCodeMotionPass.cpp.o 

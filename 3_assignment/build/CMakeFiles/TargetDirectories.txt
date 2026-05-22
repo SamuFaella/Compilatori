@@ -1,0 +1,9 @@
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/intrinsics_gen.dir
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/omp_gen.dir
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/acc_gen.dir
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/ARMTargetParserTableGen.dir
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/AArch64TargetParserTableGen.dir
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/RISCVTargetParserTableGen.dir
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/LoopInvariantCodeMotionPass.dir
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/edit_cache.dir
+/home/samu/Laboratorio_Compilatori_2026/3_assignament/build/CMakeFiles/rebuild_cache.dir
