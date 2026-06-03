@@ -4,19 +4,20 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:
 target triple = "x86_64-unknown-linux-gnu"
 
 @.str = private unnamed_addr constant [25 x i8] c"L0 guarded adjacent: %d\0A\00", align 1
-@.str.1 = private unnamed_addr constant [25 x i8] c"L1 guarded adjacent: %d\0A\00", align 1
+@.str.1 = private unnamed_addr constant [15 x i8] c"Between loops\0A\00", align 1
+@.str.2 = private unnamed_addr constant [25 x i8] c"L1 guarded adjacent: %d\0A\00", align 1
 
 ; Function Attrs: noinline nounwind uwtable
 define dso_local void @both_guarded_adjacent(i32 noundef %0, i32 noundef %1) #0 {
   %3 = icmp sgt i32 %0, 0
-  br i1 %3, label %4, label %12
+  br i1 %3, label %4, label %13
 
 4:                                                ; preds = %2
   br label %5
 
 5:                                                ; preds = %9, %4
   %.01 = phi i32 [ 0, %4 ], [ %10, %9 ]
-  %6 = icmp slt i32 %.01, 11
+  %6 = icmp slt i32 %.01, 10
   br i1 %6, label %7, label %11
 
 7:                                                ; preds = %5
@@ -28,32 +29,26 @@ define dso_local void @both_guarded_adjacent(i32 noundef %0, i32 noundef %1) #0 
   br label %5, !llvm.loop !6
 
 11:                                               ; preds = %5
-  br label %12
+  %12 = call i32 (ptr, ...) @printf(ptr noundef @.str.1)
+  br label %13
 
-12:                                               ; preds = %11, %2
-  %13 = icmp sgt i32 %1, 0
-  br i1 %13, label %14, label %22
+13:                                               ; preds = %11, %2
+  br label %14
 
-14:                                               ; preds = %12
-  br label %15
+14:                                               ; preds = %18, %13
+  %.0 = phi i32 [ 0, %13 ], [ %19, %18 ]
+  %15 = icmp slt i32 %.0, 10
+  br i1 %15, label %16, label %20
 
-15:                                               ; preds = %19, %14
-  %.0 = phi i32 [ 0, %14 ], [ %20, %19 ]
-  %16 = icmp slt i32 %.0, 21
-  br i1 %16, label %17, label %21
+16:                                               ; preds = %14
+  %17 = call i32 (ptr, ...) @printf(ptr noundef @.str.2, i32 noundef %.0)
+  br label %18
 
-17:                                               ; preds = %15
-  %18 = call i32 (ptr, ...) @printf(ptr noundef @.str.1, i32 noundef %.0)
-  br label %19
+18:                                               ; preds = %16
+  %19 = add nsw i32 %.0, 1
+  br label %14, !llvm.loop !8
 
-19:                                               ; preds = %17
-  %20 = add nsw i32 %.0, 1
-  br label %15, !llvm.loop !8
-
-21:                                               ; preds = %15
-  br label %22
-
-22:                                               ; preds = %21, %12
+20:                                               ; preds = %14
   ret void
 }
 

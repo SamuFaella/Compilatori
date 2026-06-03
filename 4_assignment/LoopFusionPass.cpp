@@ -425,6 +425,20 @@ bool haveSameTripCount(Loop *L0, Loop *L1, ScalarEvolution &SE) {
 
 }
 
+bool areControlFlowEquivalent(Loop *L0, Loop *L1, DominatorTree &DT, PostDominatorTree &PDT) {
+    BasicBlock *Header0 = L0->getHeader();
+    BasicBlock *Header1 = L1->getHeader();
+
+    bool dom = DT.dominates(Header0, Header1);
+    bool postDom = PDT.dominates(Header1, Header0);
+
+    errs() << "L0 domina L1? " << (dom ? "yes" : "no") << "\n";
+    errs() << "L1 post-domina L0? " << (postDom ? "yes" : "no") << "\n";
+
+    return dom && postDom;
+
+}
+
 struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
@@ -484,6 +498,14 @@ struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
             } else {
                 errs() << "Loop " << i << " e loop " << i + 1
                        << " hanno lo stesso trip count\n";
+            }
+
+            if(!areControlFlowEquivalent(L0, L1, DT, PDT)) {
+                errs() << "Loop " << i << " e loop " << i + 1
+                       << " NON sono control-flow equivalent\n";
+            } else {
+                errs() << "Loop " << i << " e loop " << i + 1
+                       << " sono control-flow equivalent\n";
             }
         }
 

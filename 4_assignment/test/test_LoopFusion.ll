@@ -4,7 +4,8 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:
 target triple = "x86_64-unknown-linux-gnu"
 
 @.str = private unnamed_addr constant [25 x i8] c"L0 guarded adjacent: %d\0A\00", align 1
-@.str.1 = private unnamed_addr constant [25 x i8] c"L1 guarded adjacent: %d\0A\00", align 1
+@.str.1 = private unnamed_addr constant [15 x i8] c"Between loops\0A\00", align 1
+@.str.2 = private unnamed_addr constant [25 x i8] c"L1 guarded adjacent: %d\0A\00", align 1
 
 ; Function Attrs: noinline nounwind uwtable
 define dso_local void @both_guarded_adjacent(i32 noundef %0, i32 noundef %1) #0 {
@@ -12,70 +13,57 @@ define dso_local void @both_guarded_adjacent(i32 noundef %0, i32 noundef %1) #0 
   %4 = alloca i32, align 4
   %5 = alloca i32, align 4
   %6 = alloca i32, align 4
-  %7 = alloca i32, align 4
-  %8 = alloca i32, align 4
   store i32 %0, ptr %3, align 4
   store i32 %1, ptr %4, align 4
-  store i32 11, ptr %5, align 4
-  store i32 21, ptr %6, align 4
-  %9 = load i32, ptr %3, align 4
-  %10 = icmp sgt i32 %9, 0
-  br i1 %10, label %11, label %23
+  %7 = load i32, ptr %3, align 4
+  %8 = icmp sgt i32 %7, 0
+  br i1 %8, label %9, label %21
 
-11:                                               ; preds = %2
-  store i32 0, ptr %7, align 4
-  br label %12
+9:                                                ; preds = %2
+  store i32 0, ptr %5, align 4
+  br label %10
 
-12:                                               ; preds = %19, %11
-  %13 = load i32, ptr %7, align 4
+10:                                               ; preds = %16, %9
+  %11 = load i32, ptr %5, align 4
+  %12 = icmp slt i32 %11, 10
+  br i1 %12, label %13, label %19
+
+13:                                               ; preds = %10
   %14 = load i32, ptr %5, align 4
-  %15 = icmp slt i32 %13, %14
-  br i1 %15, label %16, label %22
+  %15 = call i32 (ptr, ...) @printf(ptr noundef @.str, i32 noundef %14)
+  br label %16
 
-16:                                               ; preds = %12
-  %17 = load i32, ptr %7, align 4
-  %18 = call i32 (ptr, ...) @printf(ptr noundef @.str, i32 noundef %17)
-  br label %19
+16:                                               ; preds = %13
+  %17 = load i32, ptr %5, align 4
+  %18 = add nsw i32 %17, 1
+  store i32 %18, ptr %5, align 4
+  br label %10, !llvm.loop !6
 
-19:                                               ; preds = %16
-  %20 = load i32, ptr %7, align 4
-  %21 = add nsw i32 %20, 1
-  store i32 %21, ptr %7, align 4
-  br label %12, !llvm.loop !6
+19:                                               ; preds = %10
+  %20 = call i32 (ptr, ...) @printf(ptr noundef @.str.1)
+  br label %21
 
-22:                                               ; preds = %12
-  br label %23
+21:                                               ; preds = %19, %2
+  store i32 0, ptr %6, align 4
+  br label %22
 
-23:                                               ; preds = %22, %2
-  %24 = load i32, ptr %4, align 4
-  %25 = icmp sgt i32 %24, 0
-  br i1 %25, label %26, label %38
+22:                                               ; preds = %28, %21
+  %23 = load i32, ptr %6, align 4
+  %24 = icmp slt i32 %23, 10
+  br i1 %24, label %25, label %31
 
-26:                                               ; preds = %23
-  store i32 0, ptr %8, align 4
-  br label %27
+25:                                               ; preds = %22
+  %26 = load i32, ptr %6, align 4
+  %27 = call i32 (ptr, ...) @printf(ptr noundef @.str.2, i32 noundef %26)
+  br label %28
 
-27:                                               ; preds = %34, %26
-  %28 = load i32, ptr %8, align 4
+28:                                               ; preds = %25
   %29 = load i32, ptr %6, align 4
-  %30 = icmp slt i32 %28, %29
-  br i1 %30, label %31, label %37
+  %30 = add nsw i32 %29, 1
+  store i32 %30, ptr %6, align 4
+  br label %22, !llvm.loop !8
 
-31:                                               ; preds = %27
-  %32 = load i32, ptr %8, align 4
-  %33 = call i32 (ptr, ...) @printf(ptr noundef @.str.1, i32 noundef %32)
-  br label %34
-
-34:                                               ; preds = %31
-  %35 = load i32, ptr %8, align 4
-  %36 = add nsw i32 %35, 1
-  store i32 %36, ptr %8, align 4
-  br label %27, !llvm.loop !8
-
-37:                                               ; preds = %27
-  br label %38
-
-38:                                               ; preds = %37, %23
+31:                                               ; preds = %22
   ret void
 }
 

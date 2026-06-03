@@ -12,19 +12,19 @@
  * Se L0 viene eseguito, all'uscita si arriva direttamente al guard di L1.
  */
 void both_guarded_adjacent(int N, int M) {
-    int t1 = 11;
-    int t2 = 21;
     if (N > 0) {
-        for (int i = 0; i < t1; i++) {
+        for (int i = 0; i < 10; i++) {
             printf("L0 guarded adjacent: %d\n", i);
         }
+
+        printf("Between loops\n");
+
+        
     }
 
-    if (M > 0) {
-        for (int j = 0; j < t2; j++) {
-            printf("L1 guarded adjacent: %d\n", j);
+    for(int i = 0; i < 10; i++) {
+            printf("L1 guarded adjacent: %d\n", i);
         }
-    }
 }
 
 
