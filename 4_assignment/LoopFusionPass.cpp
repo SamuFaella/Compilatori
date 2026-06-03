@@ -406,6 +406,25 @@ bool areAdjacent(Loop *L0, Loop *L1, LoopInfo &LI) {
     return false;
 }
 
+bool haveSameTripCount(Loop *L0, Loop *L1, ScalarEvolution &SE) {
+    const SCEV *TripCount0 = SE.getBackedgeTakenCount(L0);
+    const SCEV *TripCount1 = SE.getBackedgeTakenCount(L1);
+
+    if (isa<SCEVCouldNotCompute>(TripCount0) || isa<SCEVCouldNotCompute>(TripCount1)) {
+        errs() << "Trip count non calcolabile\n";
+        return false;
+    }
+
+    errs() << "Trip count L0: " << *TripCount0 << "\n";
+    errs() << "Trip count L1: " << *TripCount1 << "\n";
+
+    if (TripCount0 == TripCount1) 
+        return true;
+
+    return SE.isKnownPredicate(ICmpInst::ICMP_EQ, TripCount0, TripCount1);
+
+}
+
 struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
@@ -457,6 +476,14 @@ struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
             } else {
                 errs() << "Loop " << i << " e loop " << i + 1
                        << " NON sono adiacenti\n";
+            }
+
+            if(!haveSameTripCount(L0, L1, SE)) {
+                errs() << "Loop " << i << " e loop " << i + 1
+                       << " NON hanno lo stesso trip count\n";
+            } else {
+                errs() << "Loop " << i << " e loop " << i + 1
+                       << " hanno lo stesso trip count\n";
             }
         }
 
