@@ -1,169 +1,353 @@
 #include <stdio.h>
 
 /*
- * Caso 1:
- * L0 guarded, L1 guarded, adiacenti.
+ * CASO 1: completamente fondibile
  *
- * Struttura attesa:
- * if (...) { loop0 }
- * if (...) { loop1 }
- *
- * Se L0 viene saltato, si arriva direttamente al guard di L1.
- * Se L0 viene eseguito, all'uscita si arriva direttamente al guard di L1.
+ * Atteso:
+ * - adiacenza: yes
+ * - trip count: yes
+ * - control-flow equivalence: yes
+ * - dependence: safe
+ * - risultato: fondibile
  */
-void both_guarded_adjacent(int N, int M) {
-    if (N > 0) {
+void fusible_test(int N) {
+    int A[10];
+    int B[10];
+
+    if (N > 10) {
         for (int i = 0; i < 10; i++) {
-            printf("L0 guarded adjacent: %d\n", i);
+            A[i] = i;
+        }
+
+        for (int j = 0; j < 10; j++) {
+            B[j] = j + 1;
+        }
+    }
+}
+
+/*
+ * CASO 2: dipendenza negativa
+ *
+ * L0 scrive A[i]
+ * L1 legge A[j + 1]
+ *
+ * Dopo fusion, alla iterazione j, L1 leggerebbe un valore prodotto
+ * da una futura iterazione di L0.
+ *
+ * Atteso:
+ * - adiacenza: yes
+ * - trip count: yes
+ * - control-flow equivalence: yes
+ * - dependence: negative
+ * - risultato: NON fondibile
+ */
+void negative_dep_test(int N) {
+    int A[11];
+    int B[10];
+
+    if (N > 10) {
+        for (int i = 0; i < 10; i++) {
+            A[i] = i;
+        }
+
+        for (int j = 0; j < 10; j++) {
+            B[j] = A[j + 1] + 1;
+        }
+    }
+}
+
+/*
+ * CASO 3: dipendenza a distanza zero, generalmente sicura
+ *
+ * L0 scrive A[i]
+ * L1 legge A[j]
+ *
+ * Dopo fusion:
+ *   A[i] = i;
+ *   B[i] = A[i] + 1;
+ *
+ * Il valore letto è prodotto nella stessa iterazione.
+ *
+ * Atteso:
+ * - adiacenza: yes
+ * - trip count: yes
+ * - control-flow equivalence: yes
+ * - dependence: safe oppure classificata sicura dall'analisi semplice
+ * - risultato: fondibile
+ */
+void zero_distance_dep_test(int N) {
+    int A[10];
+    int B[10];
+
+    if (N > 10) {
+        for (int i = 0; i < 10; i++) {
+            A[i] = i;
+        }
+
+        for (int j = 0; j < 10; j++) {
+            B[j] = A[j] + 1;
+        }
+    }
+}
+
+/*
+ * CASO 4: non adiacenti
+ *
+ * C'è uno statement reale tra i due loop.
+ *
+ * Atteso:
+ * - adiacenza: no
+ * - risultato: NON fondibile subito
+ */
+void not_adjacent_test(int N) {
+    int A[10];
+    int B[10];
+
+    if (N > 10) {
+        for (int i = 0; i < 10; i++) {
+            A[i] = i;
         }
 
         printf("Between loops\n");
 
-        
-    }
-
-    for(int i = 0; i < 10; i++) {
-            printf("L1 guarded adjacent: %d\n", i);
-        }
-}
-
-
-/*
- * Caso 2:
- * L0 guarded, L1 non guarded, NON adiacenti.
- *
- * Tra L0 e L1 c'è una istruzione extra.
- 
-void l0_guarded_l1_not_guarded_not_adjacent(int N) {
-    if (N > 0) {
-        for (int i = 0; i < 10; i++) {
-            printf("L0 guarded: %d\n", i);
-        }
-    }
-
-    puts("statement between loops");
-
-    for (int j = 0; j < 10; j++) {
-        printf("L1 non guarded: %d\n", j);
-    }
-}
-*/
-
-/*
- * Caso 3:
- * L0 guarded, L1 non guarded, adiacenti.
- *
- * Se L0 viene saltato, si arriva direttamente al preheader di L1.
- * Se L0 viene eseguito, all'uscita si arriva direttamente al preheader di L1.
- 
-void l0_guarded_l1_not_guarded_adjacent(int N) {
-    if (N > 0) {
-        for (int i = 0; i < 10; i++) {
-            printf("L0 guarded adjacent: %d\n", i);
-        }
-    }
-
-    for (int j = 0; j < 10; j++) {
-        printf("L1 non guarded adjacent: %d\n", j);
-    }
-}*/
-
-
-/*
- * Caso 4:
- * L0 non guarded, L1 guarded, adiacenti.
- *
- * L'uscita di L0 arriva direttamente al guard di L1.
-
-void l0_not_guarded_l1_guarded_adjacent(int M) {
-    for (int i = 0; i < 10; i++) {
-        printf("L0 non guarded adjacent: %d\n", i);
-    }
-
-    if (M > 0) {
         for (int j = 0; j < 10; j++) {
-            printf("L1 guarded adjacent: %d\n", j);
+            B[j] = j + 1;
         }
     }
 }
+
+/*
+ * CASO 5: trip count diverso
+ *
+ * Primo loop: 10 iterazioni.
+ * Secondo loop: 8 iterazioni.
+ *
+ * Atteso:
+ * - adiacenza: yes
+ * - trip count: no
+ * - risultato: NON fondibile
  */
+void different_trip_count_test(int N) {
+    int A[10];
+    int B[10];
 
-/*
- * Caso 5:
- * L0 non guarded, L1 guarded, NON adiacenti.
- *
- * Tra L0 e il guard di L1 c'è una istruzione extra.
- 
-void l0_not_guarded_l1_guarded_not_adjacent(int M) {
-    for (int i = 0; i < 10; i++) {
-        printf("L0 non guarded: %d\n", i);
-    }
-
-    puts("statement between loops");
-
-    if (M > 0) {
-        for (int j = 0; j < 10; j++) {
-            printf("L1 guarded: %d\n", j);
-        }
-    }
-}*/
-
-
-/*
- * Caso 6:
- * L0 guarded, L1 guarded, NON adiacenti.
- *
- * Tra il primo if/loop e il guard del secondo loop c'è una istruzione extra.
- 
-void both_guarded_not_adjacent(int N, int M) {
-    if (N > 0) {
+    if (N > 10) {
         for (int i = 0; i < 10; i++) {
-            printf("L0 guarded: %d\n", i);
+            A[i] = i;
+        }
+
+        for (int j = 0; j < 8; j++) {
+            B[j] = j + 1;
+        }
+    }
+}
+
+/*
+ * CASO 6: non control-flow equivalent
+ *
+ * L1 può essere eseguito anche quando L0 viene saltato.
+ *
+ * Atteso:
+ * - adiacenza: può risultare yes o no a seconda del CFG
+ * - trip count: yes
+ * - control-flow equivalence: no
+ * - risultato: NON fondibile
+ */
+void not_control_flow_equivalent_test(int N) {
+    int A[10];
+    int B[10];
+
+    if (N > 10) {
+        for (int i = 0; i < 10; i++) {
+            A[i] = i;
         }
     }
 
-    puts("statement between guarded loops");
+    for (int j = 0; j < 10; j++) {
+        B[j] = j + 1;
+    }
+}
 
-    if (M > 0) {
+/*
+ * CASO 7: due guard separati con stessa condizione
+ *
+ * Semanticamente sembrano legati, ma a livello CFG sono due branch distinti.
+ * DominatorTree/PostDominatorTree non ragionano sul fatto che le condizioni
+ * siano uguali.
+ *
+ * Atteso:
+ * - adiacenza: yes, se non c'è codice tra i due if
+ * - trip count: yes
+ * - control-flow equivalence: no
+ * - risultato: NON fondibile
+ */
+void two_separate_guards_same_condition_test(int N) {
+    int A[10];
+    int B[10];
+
+    if (N > 10) {
+        for (int i = 0; i < 10; i++) {
+            A[i] = i;
+        }
+    }
+
+    if (N > 10) {
         for (int j = 0; j < 10; j++) {
-            printf("L1 guarded: %d\n", j);
+            B[j] = j + 1;
         }
     }
 }
-*/
 
 /*
- * Caso 7:
- * L0 non guarded, L1 non guarded, adiacenti.
+ * CASO 8: due guard separati con condizioni diverse
  *
- * È il tuo caso base.
- 
-void both_not_guarded_adjacent(void) {
+ * Chiaramente non control-flow equivalent:
+ * L0 può eseguire senza L1 e viceversa.
+ *
+ * Atteso:
+ * - control-flow equivalence: no
+ * - risultato: NON fondibile
+ */
+void two_separate_guards_different_conditions_test(int N, int M) {
+    int A[10];
+    int B[10];
+
+    if (N > 10) {
+        for (int i = 0; i < 10; i++) {
+            A[i] = i;
+        }
+    }
+
+    if (M > 10) {
+        for (int j = 0; j < 10; j++) {
+            B[j] = j + 1;
+        }
+    }
+}
+
+/*
+ * CASO 9: dipendenza non negativa, offset indietro
+ *
+ * L0 scrive A[i]
+ * L1 legge A[j - 1]
+ *
+ * Per j = 1 legge A[0], che è già stato prodotto da una iterazione precedente.
+ * Dal punto di vista della fusion non è una dipendenza negativa.
+ *
+ * Nota: j parte da 1 per evitare A[-1].
+ *
+ * Atteso:
+ * - trip count potrebbe essere diverso se il tuo SE vede 9 vs 10
+ * - utile soprattutto per testare l'analisi degli offset
+ */
+void backward_read_not_negative_test(int N) {
+    int A[10];
+    int B[10];
+
+    if (N > 10) {
+        for (int i = 0; i < 9; i++) {
+            A[i] = i;
+        }
+
+        for (int j = 0; j < 9; j++) {
+            B[j] = A[j] + 1;
+        }
+    }
+}
+
+/*
+ * CASO 10: accesso con offset positivo maggiore
+ *
+ * L0 scrive A[i]
+ * L1 legge A[j + 3]
+ *
+ * È simile all'esempio delle slide.
+ *
+ * Atteso:
+ * - dependence: negative
+ * - risultato: NON fondibile
+ */
+void negative_dep_plus_three_test(int N) {
+    int A[13];
+    int B[10];
+
+    if (N > 10) {
+        for (int i = 0; i < 10; i++) {
+            A[i] = i;
+        }
+
+        for (int j = 0; j < 10; j++) {
+            B[j] = A[j + 3] + 1;
+        }
+    }
+}
+
+/*
+ * CASO 11: puntatori potenzialmente aliasanti
+ *
+ * A e B sono parametri. Senza restrict, LLVM può non sapere se aliasano.
+ *
+ * Atteso:
+ * - può diventare UnknownUnsafe
+ * - utile per vedere la parte conservativa del passo
+ */
+void pointer_may_alias_unknown_test(int *A, int *B, int N) {
+    if (N > 10) {
+        for (int i = 0; i < 10; i++) {
+            A[i] = i;
+        }
+
+        for (int j = 0; j < 10; j++) {
+            B[j] = B[j] + 1;
+        }
+    }
+}
+
+/*
+ * CASO 12: loop non guarded, adiacenti, sicuri
+ *
+ * Caso base senza if.
+ *
+ * Atteso:
+ * - L0 guarded? no
+ * - L1 guarded? no
+ * - adiacenza: yes
+ * - trip count: yes
+ * - control-flow equivalence: yes
+ * - dependence: safe
+ */
+void non_guarded_fusible_test(void) {
+    int A[10];
+    int B[10];
+
     for (int i = 0; i < 10; i++) {
-        printf("L0 non guarded adjacent: %d\n", i);
+        A[i] = i;
     }
 
     for (int j = 0; j < 10; j++) {
-        printf("L1 non guarded adjacent: %d\n", j);
+        B[j] = j + 1;
     }
 }
-*/
 
 /*
- * Caso 8:
- * L0 non guarded, L1 non guarded, NON adiacenti.
+ * CASO 13: loop non guarded ma non adiacenti
  *
- * Tra i due loop c'è una istruzione extra.
- 
-void both_not_guarded_not_adjacent(void) {
+ * Atteso:
+ * - L0 guarded? no
+ * - L1 guarded? no
+ * - adiacenza: no
+ */
+void non_guarded_not_adjacent_test(void) {
+    int A[10];
+    int B[10];
+
     for (int i = 0; i < 10; i++) {
-        printf("L0 non guarded: %d\n", i);
+        A[i] = i;
     }
 
-    puts("statement between loops");
+    printf("Between loops\n");
 
     for (int j = 0; j < 10; j++) {
-        printf("L1 non guarded: %d\n", j);
+        B[j] = j + 1;
     }
 }
-*/
