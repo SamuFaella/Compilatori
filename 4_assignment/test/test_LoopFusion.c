@@ -10,16 +10,16 @@
  * - dependence: safe
  * - risultato: fondibile
  */
-void fusible_test(int N) {
-    int A[10];
-    int B[10];
+void fusible_test(int N, int M) {
+    int *A;
+    int *B;
 
-    if (N > 10) {
-        for (int i = 0; i < 10; i++) {
+    if (N < M) {
+        for (int i = N; i < M; i++) {
             A[i] = i;
         }
 
-        for (int j = 0; j < 10; j++) {
+        for (int j = N; j < M; j++) {
             B[j] = j + 1;
         }
     }

@@ -60,10 +60,21 @@ struct LinearExpr {
     int64_t Const = 0;
 };
 
+// Descrive la induction variable di un loop
+struct SimpleIVInfo {
+    PHINode *IV = nullptr;
+    const SCEV *Start = nullptr;
+};
+
+// Descrive un semplice accesso in memoria
 struct SimpleAccess {
     Instruction *Inst = nullptr;
-    Value *Base = nullptr;
+    Value *Base = nullptr; //Oggetto base dell'accesso
+
+    // Servono a rappresentare un indice del tipo Start + Offset, dove Start è la SCEV della IV e Offset è una costante.
+    const SCEV *Start = nullptr;
     int64_t Offset = 0;
+
     bool IsLoad = false;
     bool IsStore = false;
 };
@@ -81,19 +92,25 @@ void printBB(StringRef Label, BasicBlock *BB) {
     errs() << "\n";
 }
 
-// True se BB contiene solo un branch incondizionato.
+// Serve per capire se un BB è vuoto dal punto di vista del programma, cioè se non contiene istruzione reali,
+// ma solo un salto incodizionato verso un altro blocco
+// funzione utile per controllare correttamente l'adiacenza
 bool isEmptyUnconditionalBlock(BasicBlock *BB) {
     if (!BB)
         return false;
 
+    // Controllo il terminatore del blocco
+    // accetto solo -> br label %qualcosa
     BranchInst *BI = dyn_cast<BranchInst>(BB->getTerminator());
     if (!BI || !BI->isUnconditional())
         return false;
 
     for (Instruction &I : *BB) {
+        // l'istruzione è il terminator (br) -> la ignoro
         if (&I == BB->getTerminator())
             continue;
 
+        // è un'istruzione di debug -> la ignoro
         if (isa<DbgInfoIntrinsic>(&I))
             continue;
 
@@ -122,17 +139,21 @@ bool hasRealStatement(BasicBlock *BB) {
     return false;
 }
 
-// True se From arriva a To passando solo da blocchi vuoti.
+// True se parto da un BB From ed arrivo a To passando solo da blocchi vuoti.
 bool emptyPathToTarget(BasicBlock *From, BasicBlock *To) {
     if (!From || !To)
         return false;
 
+    // Inizio del cammino
     BasicBlock *Cur = From;
 
+    // Faccio al max 8 passi -> limite per evitare loop infiniti nel mio pass
     for (unsigned Steps = 0; Steps < 8; ++Steps) {
+        // Controllo se il blocco è vuoto
         if (!isEmptyUnconditionalBlock(Cur))
             return false;
 
+        // istruzioni per muovermi verso il blocco successivo
         BranchInst *BI = cast<BranchInst>(Cur->getTerminator());
         BasicBlock *Succ = BI->getSuccessor(0);
 
@@ -178,6 +199,7 @@ GuardInfo getGuardInfo(Loop *L, LoopInfo &LI) {
     if (!Preheader)
         return GI;
 
+    // Guardi tutti i predecessori del preheader, cioè cerchi tutti i BB che arrivano al preheader.
     for (BasicBlock *Pred : predecessors(Preheader)) {
         // Un guard deve essere esterno al loop.
         if (L->contains(Pred))
@@ -187,10 +209,12 @@ GuardInfo getGuardInfo(Loop *L, LoopInfo &LI) {
         if (LI.getLoopFor(Pred) != nullptr)
             continue;
 
+        // Prendi il terminator del predecessore, per essere guard deve terminare con un branch condizionale
         BranchInst *BI = dyn_cast<BranchInst>(Pred->getTerminator());
         if (!BI || !BI->isConditional())
             continue;
 
+        // un branch  condizionato ha due successori.
         BasicBlock *Succ0 = BI->getSuccessor(0);
         BasicBlock *Succ1 = BI->getSuccessor(1);
 
@@ -353,17 +377,13 @@ void printDependenceDirection(unsigned Dir) {
     errs() << "\n";
 }
 
-// Prova a trovare una IV del tipo: i = phi [0, preheader], [i + 1, latch].
-PHINode *findSimpleIV(Loop *L) {
-    if (PHINode *IV = L->getCanonicalInductionVariable())
-        return IV;
-
+std::optional<SimpleIVInfo> findSimpleIV(Loop *L, ScalarEvolution &SE) {
     BasicBlock *Header = L->getHeader();
     BasicBlock *Preheader = L->getLoopPreheader();
     BasicBlock *Latch = L->getLoopLatch();
 
     if (!Header || !Preheader || !Latch)
-        return nullptr;
+        return std::nullopt;
 
     for (Instruction &I : *Header) {
         PHINode *Phi = dyn_cast<PHINode>(&I);
@@ -376,10 +396,6 @@ PHINode *findSimpleIV(Loop *L) {
         Value *StartValue = Phi->getIncomingValueForBlock(Preheader);
         Value *LatchValue = Phi->getIncomingValueForBlock(Latch);
 
-        ConstantInt *Start = dyn_cast<ConstantInt>(StartValue);
-        if (!Start || !Start->isZero())
-            continue;
-
         BinaryOperator *BO = dyn_cast<BinaryOperator>(LatchValue);
         if (!BO || BO->getOpcode() != Instruction::Add)
             continue;
@@ -390,14 +406,18 @@ PHINode *findSimpleIV(Loop *L) {
         ConstantInt *C0 = dyn_cast<ConstantInt>(Op0);
         ConstantInt *C1 = dyn_cast<ConstantInt>(Op1);
 
-        if (Op0 == Phi && C1 && C1->isOne())
-            return Phi;
+        // Caso: i + 1
+        if (Op0 == Phi && C1 && C1->isOne()) {
+            return SimpleIVInfo{Phi, SE.getSCEV(StartValue)};
+        }
 
-        if (Op1 == Phi && C0 && C0->isOne())
-            return Phi;
+        // Caso: 1 + i
+        if (Op1 == Phi && C0 && C0->isOne()) {
+            return SimpleIVInfo{Phi, SE.getSCEV(StartValue)};
+        }
     }
 
-    return nullptr;
+    return std::nullopt;
 }
 
 // Riconosce espressioni lineari semplici rispetto alla IV.
@@ -458,11 +478,14 @@ std::optional<LinearExpr> getLinearExprFromIV(Value *V, PHINode *IV) {
     return std::nullopt;
 }
 
-// Estrae base e offset da una load/store del tipo A[i + c].
-std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I, Loop *L) {
-    PHINode *IV = findSimpleIV(L);
-    if (!IV)
+std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I,
+                                                Loop *L,
+                                                ScalarEvolution &SE) {
+    std::optional<SimpleIVInfo> IVInfo = findSimpleIV(L, SE);
+    if (!IVInfo)
         return std::nullopt;
+
+    PHINode *IV = IVInfo->IV;
 
     Value *Ptr = nullptr;
     bool IsLoad = false;
@@ -485,7 +508,6 @@ std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I, Loop *L) {
     Value *Base = getUnderlyingObject(GEP->getPointerOperand())->stripPointerCasts();
 
     Value *Index = nullptr;
-
     for (auto Idx = GEP->idx_begin(); Idx != GEP->idx_end(); ++Idx)
         Index = Idx->get();
 
@@ -496,13 +518,14 @@ std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I, Loop *L) {
     if (!Expr)
         return std::nullopt;
 
-    // Gestiamo solo accessi A[i + c].
+    // Gestiamo solo A[i + c].
     if (Expr->Coeff != 1)
         return std::nullopt;
 
     SimpleAccess A;
     A.Inst = I;
     A.Base = Base;
+    A.Start = IVInfo->Start;
     A.Offset = Expr->Const;
     A.IsLoad = IsLoad;
     A.IsStore = IsStore;
@@ -514,14 +537,14 @@ std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I, Loop *L) {
 SimpleDepResult classifySimpleDependence(Instruction *I0,
                                           Instruction *I1,
                                           Loop *L0,
-                                          Loop *L1) {
-    auto A0 = getSimpleAccessInfo(I0, L0);
-    auto A1 = getSimpleAccessInfo(I1, L1);
+                                          Loop *L1,
+                                          ScalarEvolution &SE) {
+    auto A0 = getSimpleAccessInfo(I0, L0, SE);
+    auto A1 = getSimpleAccessInfo(I1, L1, SE);
 
     if (!A0 || !A1)
         return SimpleDepResult::Unknown;
 
-    // Se le basi sono due alloca diverse, le considero indipendenti.
     if (A0->Base != A1->Base) {
         if (isa<AllocaInst>(A0->Base) && isa<AllocaInst>(A1->Base))
             return SimpleDepResult::Safe;
@@ -532,10 +555,20 @@ SimpleDepResult classifySimpleDependence(Instruction *I0,
     errs() << "Analisi semplice sugli indici:\n";
     errs() << "  I0: " << *I0 << "\n";
     errs() << "  I1: " << *I1 << "\n";
+    errs() << "  Start L0: " << *A0->Start << "\n";
+    errs() << "  Start L1: " << *A1->Start << "\n";
     errs() << "  Offset L0: " << A0->Offset << "\n";
     errs() << "  Offset L1: " << A1->Offset << "\n";
 
-    // Caso: store A[i] nel loop 0 e load A[j + k] nel loop 1 con k > 0.
+    bool SameStart =
+        (A0->Start == A1->Start) ||
+        SE.isKnownPredicate(ICmpInst::ICMP_EQ, A0->Start, A1->Start);
+
+    if (!SameStart) {
+        errs() << "Start diversi o non dimostrabili uguali: dipendenza non classificabile\n";
+        return SimpleDepResult::Unknown;
+    }
+
     if (A1->Offset > A0->Offset) {
         errs() << "Dipendenza negativa riconosciuta dagli offset\n";
         return SimpleDepResult::Negative;
@@ -547,7 +580,8 @@ SimpleDepResult classifySimpleDependence(Instruction *I0,
 // Controllo dipendenze: LLVM DA + fallback semplice sugli indici.
 DependenceResult checkDependences(Loop *L0,
                                   Loop *L1,
-                                  DependenceInfo &DI) {
+                                  DependenceInfo &DI,
+                                  ScalarEvolution &SE) {
     SmallVector<Instruction *, 16> MemInsts0;
     SmallVector<Instruction *, 16> MemInsts1;
 
@@ -575,7 +609,7 @@ DependenceResult checkDependences(Loop *L0,
             if (Levels == 0) {
                 errs() << "Dipendenza non classificabile da LLVM, provo analisi semplice\n";
 
-                SimpleDepResult Simple = classifySimpleDependence(I0, I1, L0, L1);
+                SimpleDepResult Simple = classifySimpleDependence(I0, I1, L0, L1, SE);
 
                 if (Simple == SimpleDepResult::Negative) {
                     errs() << "Dipendenza negativa/backward trovata\n";
@@ -715,7 +749,7 @@ struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
                    << " sono control-flow equivalent\n";
 
             // 4. Dependence analysis
-            DependenceResult DepRes = checkDependences(L0, L1, DI);
+            DependenceResult DepRes = checkDependences(L0, L1, DI, SE);
 
             if (DepRes == DependenceResult::Negative) {
                 errs() << "Loop NON fondibili: dipendenza negativa/backward\n";
