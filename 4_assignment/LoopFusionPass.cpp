@@ -64,6 +64,7 @@ struct LinearExpr {
 struct SimpleIVInfo {
     PHINode *IV = nullptr;
     const SCEV *Start = nullptr;
+    int64_t Step = 0;
 };
 
 // Descrive un semplice accesso in memoria
@@ -73,6 +74,7 @@ struct SimpleAccess {
 
     // Servono a rappresentare un indice del tipo Start + Offset, dove Start è la SCEV della IV e Offset è una costante.
     const SCEV *Start = nullptr;
+    int64_t Step = 0;
     int64_t Offset = 0;
 
     bool IsLoad = false;
@@ -376,28 +378,49 @@ void printDependenceDirection(unsigned Dir) {
 
     errs() << "\n";
 }
-
+/**
+ * @brief Serve a trovare una semplice induction variable dentro un loop LLVM.
+ * Riconosce una PHI del tipo:  i = phi [StartValue, Preheader], [i + 1, Latch]
+ * Cioè una variabile che:
+ *  - Prende il valore iniziale del preheader
+ *  - Viene aggiornata nel latch
+ *  - Cresce di 1 ad ogni iterazione
+ * 
+ * 
+ * @param L  Loop di riferimento
+ * @param SE valore della induction variable
+ * @return std::optional<SimpleIVInfo> 
+ */
 std::optional<SimpleIVInfo> findSimpleIV(Loop *L, ScalarEvolution &SE) {
     BasicBlock *Header = L->getHeader();
     BasicBlock *Preheader = L->getLoopPreheader();
     BasicBlock *Latch = L->getLoopLatch();
 
+    // Per riconoscere questa forma semplice ci servono:
+    //   - header: dove sta la PHI della IV;
+    //   - preheader: da dove arriva il valore iniziale;
+    //   - latch: da dove arriva il valore aggiornato.
     if (!Header || !Preheader || !Latch)
         return std::nullopt;
 
+    // Scorro tutte le istruzioni dell'header cercando una PHI candidata.
     for (Instruction &I : *Header) {
         PHINode *Phi = dyn_cast<PHINode>(&I);
         if (!Phi)
             continue;
 
+        // La IV che cerchiamo deve essere intera.
         if (!Phi->getType()->isIntegerTy())
             continue;
 
+        // Valore iniziale della IV, preso dal preheader.
         Value *StartValue = Phi->getIncomingValueForBlock(Preheader);
+
+        // Valore aggiornato della IV, preso dal latch.
         Value *LatchValue = Phi->getIncomingValueForBlock(Latch);
 
         BinaryOperator *BO = dyn_cast<BinaryOperator>(LatchValue);
-        if (!BO || BO->getOpcode() != Instruction::Add)
+        if (!BO)
             continue;
 
         Value *Op0 = BO->getOperand(0);
@@ -406,44 +429,94 @@ std::optional<SimpleIVInfo> findSimpleIV(Loop *L, ScalarEvolution &SE) {
         ConstantInt *C0 = dyn_cast<ConstantInt>(Op0);
         ConstantInt *C1 = dyn_cast<ConstantInt>(Op1);
 
-        // Caso: i + 1
-        if (Op0 == Phi && C1 && C1->isOne()) {
-            return SimpleIVInfo{Phi, SE.getSCEV(StartValue)};
+        if (BO->getOpcode() == Instruction::Add) {
+            // Caso: i + C
+            if (Op0 == Phi && C1) {
+                int64_t Step = C1->getSExtValue();
+
+                if (Step == 1 || Step == -1)
+                    return SimpleIVInfo{Phi, SE.getSCEV(StartValue), Step};
+            }
+
+            // Caso: C + i
+            if (Op1 == Phi && C0) {
+                int64_t Step = C0->getSExtValue();
+
+                if (Step == 1 || Step == -1)
+                    return SimpleIVInfo{Phi, SE.getSCEV(StartValue), Step};
+            }
         }
 
-        // Caso: 1 + i
-        if (Op1 == Phi && C0 && C0->isOne()) {
-            return SimpleIVInfo{Phi, SE.getSCEV(StartValue)};
+        if (BO->getOpcode() == Instruction::Sub) {
+            // Caso valido: i - C
+            if (Op0 == Phi && C1) {
+                int64_t Step = -C1->getSExtValue();
+
+                if (Step == 1 || Step == -1)
+                    return SimpleIVInfo{Phi, SE.getSCEV(StartValue), Step};
+            }
+
+            // Caso NON valido per una IV semplice:
+            // C - i
+            //
+            // Non lo gestiamo perché non rappresenta un incremento/decremento
+            // costante del tipo i = i +/- 1.
         }
     }
 
     return std::nullopt;
 }
 
-// Riconosce espressioni lineari semplici rispetto alla IV.
+/**
+ * @brief Riconosce espressioni lineari semplici rispetto alla IV.
+ * L'obiettivo è trasformare un Value LLVM in una forma: Coeff * IV + Const
+ * 
+ * @param V 
+ * @param IV 
+ * @return std::optional<LinearExpr> 
+ */
 std::optional<LinearExpr> getLinearExprFromIV(Value *V, PHINode *IV) {
+    // Se manca il valore o manca la IV, non posso analizzare nulla
     if (!V || !IV)
         return std::nullopt;
 
+    // caso base -> il valore è proprio la induction variable
+    // ex: i
+    // Forma lineare: 1*i+0
     if (V == IV)
         return LinearExpr{1, 0};
 
+    //Caso Base: il valore è una costante intera
+    // ex: 5
+    // Forma lineare: 0*i+5
     if (ConstantInt *C = dyn_cast<ConstantInt>(V))
         return LinearExpr{0, C->getSExtValue()};
 
+    // Caso frequente in LLVM -> L'indice viene castato, per ex: %idx64 = sext i32 %i to i64
+    // il cast non cambia il fatto che l'espressione dipende da i
     if (CastInst *Cast = dyn_cast<CastInst>(V))
         return getLinearExprFromIV(Cast->getOperand(0), IV);
 
+    // Caso ricorsivo -> se V è un'operazione binaria, provo ad analizzare entrambi gli operandi.
+    //ex: i+1, i-1, 2*i
     if (BinaryOperator *BO = dyn_cast<BinaryOperator>(V)) {
         Value *LHS = BO->getOperand(0);
         Value *RHS = BO->getOperand(1);
 
+        // Analizzo ricorsivamente il lato sinistro e il lato destro dell'operazione binaria.
         auto L = getLinearExprFromIV(LHS, IV);
         auto R = getLinearExprFromIV(RHS, IV);
 
+        // Se uno dei due lati non è lineare, allora l'intera espressione
+        // non è classificabile da questa funzione.
         if (!L || !R)
             return std::nullopt;
 
+        // Caso:
+        //   (a*i + b) + (c*i + d)
+        //
+        // Risultato:
+        //   (a+c)*i + (b+d)
         if (BO->getOpcode() == Instruction::Add) {
             return LinearExpr{
                 L->Coeff + R->Coeff,
@@ -451,6 +524,11 @@ std::optional<LinearExpr> getLinearExprFromIV(Value *V, PHINode *IV) {
             };
         }
 
+        // Caso:
+        //   (a*i + b) - (c*i + d)
+        //
+        // Risultato:
+        //   (a-c)*i + (b-d)
         if (BO->getOpcode() == Instruction::Sub) {
             return LinearExpr{
                 L->Coeff - R->Coeff,
@@ -458,14 +536,36 @@ std::optional<LinearExpr> getLinearExprFromIV(Value *V, PHINode *IV) {
             };
         }
 
+        // Caso moltiplicazione.
+        //
+        // Gestiamo solo moltiplicazioni in cui uno dei due lati
+        // è una costante.
+        //
+        // Esempio valido:
+        //   2 * i
+        //
+        // Esempio non gestito:
+        //   i * i
         if (BO->getOpcode() == Instruction::Mul) {
+            // Se il lato sinistro è costante, moltiplico tutta
+            // l'espressione destra per quella costante.
+            //
+            // Esempio:
+            //   2 * i
+            //
+            // L = 0*i + 2
+            // R = 1*i + 0
+            //
+            // Risultato:
+            //   2*i + 0
             if (L->Coeff == 0) {
                 return LinearExpr{
                     R->Coeff * L->Const,
                     R->Const * L->Const
                 };
             }
-
+            // Caso simmetrico:
+            //   i * 2
             if (R->Coeff == 0) {
                 return LinearExpr{
                     L->Coeff * R->Const,
@@ -475,12 +575,36 @@ std::optional<LinearExpr> getLinearExprFromIV(Value *V, PHINode *IV) {
         }
     }
 
+    // Se arrivo qui, l'espressione non è abbastanza semplice.
     return std::nullopt;
 }
-
+/**
+ * @brief Estrae informazioni da una load/store su array.
+ * L'obiettivo è riconoscere accessi semplici del tipo:
+ * A[i]
+ * A[i+1]
+ * A[i-1]
+ * A[j+3]
+ * 
+ * e trasformarli in una struttura SimpleAccess contenente:
+ * - Inst: istruzione originale;
+ * - Base: oggetto base dell'accesso, ad esempio A;
+ * - Start: valore iniziale della induction variable;
+ * - Step: passo della induction variable, ad esempio +1 o -1;
+ * - Offset: costante rispetto alla IV, ad esempio 0, +1, -1;
+ * - IsLoad / IsStore.
+ * Se l'accesso non è abbastanza semplice, ritorna std::nullopt.
+ * 
+ * @param I 
+ * @param L 
+ * @param SE 
+ * @return std::optional<SimpleAccess> 
+ */
 std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I,
                                                 Loop *L,
                                                 ScalarEvolution &SE) {
+    
+    // Prima troviamo la induction variable semplice del loop.
     std::optional<SimpleIVInfo> IVInfo = findSimpleIV(L, SE);
     if (!IVInfo)
         return std::nullopt;
@@ -491,22 +615,36 @@ std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I,
     bool IsLoad = false;
     bool IsStore = false;
 
+    // Controlliamo se l'istruzione è una load -> x = A[i]
+    // In llvm sarà una load da un puntatore calcolato
     if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
         Ptr = LI->getPointerOperand();
         IsLoad = true;
+    //Altrimenti controlliamo se l'istruzione è una store -> A[i] = x
+    // In llvm sarà una store verso un puntatore calcolato
     } else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
         Ptr = SI->getPointerOperand();
         IsStore = true;
+    // se non è una load o una store, non sappiamo gestirla
     } else {
         return std::nullopt;
     }
 
+    // Gli accessi ad array in LLVM vengono normalmente rappresentati tramite GEP (GetElementPtr)
     GEPOperator *GEP = dyn_cast<GEPOperator>(Ptr);
     if (!GEP)
         return std::nullopt;
 
+    // Recuperiamo l'oggetto base dell'accesso -> A[i+1] -> Base = A
+    // stripPointerCasts() -> rimuove eventuali cast sul puntatore.
     Value *Base = getUnderlyingObject(GEP->getPointerOperand())->stripPointerCasts();
 
+    // Prendiamo l'ultimo indice del GEP.
+    // Nei casi semplici è quello che rappresenta:
+    //
+    //   i
+    //   i + 1
+    //   j - 1
     Value *Index = nullptr;
     for (auto Idx = GEP->idx_begin(); Idx != GEP->idx_end(); ++Idx)
         Index = Idx->get();
@@ -514,18 +652,39 @@ std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I,
     if (!Index)
         return std::nullopt;
 
+    // Proviamo a scrivere l'indice nella forma:
+    //
+    //   Coeff * IV + Const
+    //
+    // Esempi:
+    //
+    //   i      -> Coeff = 1, Const = 0
+    //   i + 1  -> Coeff = 1, Const = 1
+    //   i - 1  -> Coeff = 1, Const = -1
     auto Expr = getLinearExprFromIV(Index, IV);
     if (!Expr)
         return std::nullopt;
 
-    // Gestiamo solo A[i + c].
+     // Per ora gestiamo solo accessi del tipo:
+    //
+    //   A[i + c]
+    //
+    // cioè con coefficiente della IV uguale a 1.
+    //
+    // Non gestiamo:
+    //
+    //   A[2*i + c]
+    //   A[i*i]
+    //   A[f(i)]
     if (Expr->Coeff != 1)
         return std::nullopt;
 
+    // Costruiamo la struttura con le informazioni estratte.
     SimpleAccess A;
     A.Inst = I;
     A.Base = Base;
     A.Start = IVInfo->Start;
+    A.Step = IVInfo->Step;
     A.Offset = Expr->Const;
     A.IsLoad = IsLoad;
     A.IsStore = IsStore;
@@ -533,7 +692,18 @@ std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I,
     return A;
 }
 
-// Classificazione semplice per i casi Levels == 0.
+
+/**
+ * @brief Classificazione semplice per i casi Levels == 0.
+ * Serve quando LLVM DependenceAnalysis trova una dipendenza, ma non riesce a darci direzione/distanza
+ * 
+ * @param I0 Istruzione del loop L0 coinvolta nella dipendenza
+ * @param I1 Istruzione del loop L1 coinvolta nella dipendenza
+ * @param L0 Loop L0
+ * @param L1 Loop L1
+ * @param SE ScalarEvolution
+ * @return SimpleDepResult
+ */
 SimpleDepResult classifySimpleDependence(Instruction *I0,
                                           Instruction *I1,
                                           Loop *L0,
@@ -545,6 +715,15 @@ SimpleDepResult classifySimpleDependence(Instruction *I0,
     if (!A0 || !A1)
         return SimpleDepResult::Unknown;
 
+    /*
+     * Se gli accessi sono su basi diverse:
+     *
+     * - se sono due alloca diverse, tipo int A[10] e int B[10],
+     *   li considero indipendenti;
+     *
+     * - altrimenti, ad esempio due puntatori parametro, non posso
+     *   dimostrare che non aliasino, quindi ritorno Unknown.
+     */
     if (A0->Base != A1->Base) {
         if (isa<AllocaInst>(A0->Base) && isa<AllocaInst>(A1->Base))
             return SimpleDepResult::Safe;
@@ -557,9 +736,12 @@ SimpleDepResult classifySimpleDependence(Instruction *I0,
     errs() << "  I1: " << *I1 << "\n";
     errs() << "  Start L0: " << *A0->Start << "\n";
     errs() << "  Start L1: " << *A1->Start << "\n";
+    errs() << "  Step L0: " << A0->Step << "\n";
+    errs() << "  Step L1: " << A1->Step << "\n";
     errs() << "  Offset L0: " << A0->Offset << "\n";
     errs() << "  Offset L1: " << A1->Offset << "\n";
 
+    // Gli Start devono essere uguali
     bool SameStart =
         (A0->Start == A1->Start) ||
         SE.isKnownPredicate(ICmpInst::ICMP_EQ, A0->Start, A1->Start);
@@ -569,15 +751,54 @@ SimpleDepResult classifySimpleDependence(Instruction *I0,
         return SimpleDepResult::Unknown;
     }
 
-    if (A1->Offset > A0->Offset) {
-        errs() << "Dipendenza negativa riconosciuta dagli offset\n";
-        return SimpleDepResult::Negative;
+    /*
+     * Anche lo step deve essere uguale.
+     *
+     * Per esempio:
+     *
+     *   L0: i++
+     *   L1: j++
+     *
+     * oppure:
+     *
+     *   L0: i--
+     *   L1: j--
+     *
+     * Se uno cresce e l'altro decresce, questa analisi semplice
+     * non è sufficiente.
+     */
+    if (A0->Step != A1->Step) {
+        errs() << "Step diversi: dipendenza non classificabile\n";
+        return SimpleDepResult::Unknown;
+    }
+
+    // Caso Loop Crescenti
+    if (A0->Step == 1) {
+        if (A1->Offset > A0->Offset) {
+            errs() << "Dipendenza negativa riconosciuta dagli offset, step +1\n";
+            return SimpleDepResult::Negative;
+        }
+
+        return SimpleDepResult::Safe;
+    }
+
+    // Caso Loop Decrescenti
+    if (A0->Step == -1) {
+        if (A1->Offset < A0->Offset) {
+            errs() << "Dipendenza negativa riconosciuta dagli offset, step -1\n";
+            return SimpleDepResult::Negative;
+        }
+
+        return SimpleDepResult::Safe;
     }
 
     return SimpleDepResult::Safe;
 }
 
-// Controllo dipendenze: LLVM DA + fallback semplice sugli indici.
+// Controlla le dipendenze tra L0 e L1.
+// Usa prima LLVM DependenceAnalysis.
+// Se LLVM trova una dipendenza ma non riesce a classificarla,
+// prova il fallback sugli indici A[i+c].
 DependenceResult checkDependences(Loop *L0,
                                   Loop *L1,
                                   DependenceInfo &DI,
@@ -585,18 +806,22 @@ DependenceResult checkDependences(Loop *L0,
     SmallVector<Instruction *, 16> MemInsts0;
     SmallVector<Instruction *, 16> MemInsts1;
 
+    // Raccolgo solo load/store dei due loop.
     collectMemoryInstructions(L0, MemInsts0);
     collectMemoryInstructions(L1, MemInsts1);
 
     errs() << "MemInsts in L0: " << MemInsts0.size() << "\n";
     errs() << "MemInsts in L1: " << MemInsts1.size() << "\n";
 
+    // Mi ricordo se ho trovato dipendenze non classificabili.
     bool FoundUnknownUnsafe = false;
 
+    // Confronto ogni istruzione memoria di L0 con ogni istruzione memoria di L1.
     for (Instruction *I0 : MemInsts0) {
         for (Instruction *I1 : MemInsts1) {
             std::unique_ptr<Dependence> Dep = DI.depends(I0, I1, true);
 
+            // Nessuna dipendenza tra questa coppia.
             if (!Dep)
                 continue;
 
@@ -606,9 +831,11 @@ DependenceResult checkDependences(Loop *L0,
 
             unsigned Levels = Dep->getLevels();
 
+            // LLVM ha trovato una dipendenza, ma non sa dare LT/EQ/GT.
             if (Levels == 0) {
                 errs() << "Dipendenza non classificabile da LLVM, provo analisi semplice\n";
 
+                // Provo a riconoscerla tramite base array e offset degli indici.
                 SimpleDepResult Simple = classifySimpleDependence(I0, I1, L0, L1, SE);
 
                 if (Simple == SimpleDepResult::Negative) {
@@ -621,11 +848,13 @@ DependenceResult checkDependences(Loop *L0,
                     continue;
                 }
 
+                // Non riesco a dimostrare che sia sicura.
                 errs() << "Dipendenza ancora non classificabile\n";
                 FoundUnknownUnsafe = true;
                 continue;
             }
 
+            // LLVM ha dato livelli di dipendenza: controllo le direzioni.
             for (unsigned Level = 1; Level <= Levels; ++Level) {
                 unsigned Dir = Dep->getDirection(Level);
 
@@ -657,11 +886,13 @@ DependenceResult checkDependences(Loop *L0,
                 else
                     errs() << "Distanza non calcolabile\n";
 
+                // GT indica una dipendenza backward/negativa.
                 if (Dir & Dependence::DVEntry::GT) {
                     errs() << "Dipendenza negativa/backward trovata\n";
                     return DependenceResult::Negative;
                 }
 
+                // Direzione assente/non interpretabile: blocco conservativamente.
                 if (!HasKnownDirectionAtThisLevel) {
                     errs() << "Direzione non chiara: salvo UnknownUnsafe\n";
                     FoundUnknownUnsafe = true;
@@ -671,11 +902,13 @@ DependenceResult checkDependences(Loop *L0,
         }
     }
 
+    // Ho trovato dipendenze, ma non sono riuscito a classificarle.
     if (FoundUnknownUnsafe) {
         errs() << "Trovate dipendenze non classificabili, ma nessuna negativa\n";
         return DependenceResult::UnknownUnsafe;
     }
 
+    // Nessuna dipendenza pericolosa trovata.
     errs() << "Nessuna dipendenza pericolosa trovata\n";
     return DependenceResult::Safe;
 }

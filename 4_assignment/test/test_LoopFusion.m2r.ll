@@ -685,6 +685,115 @@ define dso_local void @non_guarded_not_adjacent_test() #0 {
   ret void
 }
 
+; Function Attrs: noinline nounwind uwtable
+define dso_local void @fusible_decreasing(i32 noundef %0) #0 {
+  %2 = alloca [11 x i32], align 16
+  %3 = alloca [11 x i32], align 16
+  %4 = icmp sgt i32 %0, 10
+  br i1 %4, label %5, label %26
+
+5:                                                ; preds = %1
+  br label %6
+
+6:                                                ; preds = %11, %5
+  %.01 = phi i32 [ 10, %5 ], [ %12, %11 ]
+  %7 = icmp sgt i32 %.01, 0
+  br i1 %7, label %8, label %13
+
+8:                                                ; preds = %6
+  %9 = sext i32 %.01 to i64
+  %10 = getelementptr inbounds [11 x i32], ptr %2, i64 0, i64 %9
+  store i32 %.01, ptr %10, align 4
+  br label %11
+
+11:                                               ; preds = %8
+  %12 = add nsw i32 %.01, -1
+  br label %6, !llvm.loop !33
+
+13:                                               ; preds = %6
+  br label %14
+
+14:                                               ; preds = %23, %13
+  %.0 = phi i32 [ 10, %13 ], [ %24, %23 ]
+  %15 = icmp sgt i32 %.0, 0
+  br i1 %15, label %16, label %25
+
+16:                                               ; preds = %14
+  %17 = sext i32 %.0 to i64
+  %18 = getelementptr inbounds [11 x i32], ptr %2, i64 0, i64 %17
+  %19 = load i32, ptr %18, align 4
+  %20 = add nsw i32 %19, 1
+  %21 = sext i32 %.0 to i64
+  %22 = getelementptr inbounds [11 x i32], ptr %3, i64 0, i64 %21
+  store i32 %20, ptr %22, align 4
+  br label %23
+
+23:                                               ; preds = %16
+  %24 = add nsw i32 %.0, -1
+  br label %14, !llvm.loop !34
+
+25:                                               ; preds = %14
+  br label %26
+
+26:                                               ; preds = %25, %1
+  ret void
+}
+
+; Function Attrs: noinline nounwind uwtable
+define dso_local void @negative_decreasing(i32 noundef %0) #0 {
+  %2 = alloca [11 x i32], align 16
+  %3 = alloca [11 x i32], align 16
+  %4 = icmp sgt i32 %0, 10
+  br i1 %4, label %5, label %27
+
+5:                                                ; preds = %1
+  br label %6
+
+6:                                                ; preds = %11, %5
+  %.01 = phi i32 [ 10, %5 ], [ %12, %11 ]
+  %7 = icmp sgt i32 %.01, 0
+  br i1 %7, label %8, label %13
+
+8:                                                ; preds = %6
+  %9 = sext i32 %.01 to i64
+  %10 = getelementptr inbounds [11 x i32], ptr %2, i64 0, i64 %9
+  store i32 %.01, ptr %10, align 4
+  br label %11
+
+11:                                               ; preds = %8
+  %12 = add nsw i32 %.01, -1
+  br label %6, !llvm.loop !35
+
+13:                                               ; preds = %6
+  br label %14
+
+14:                                               ; preds = %24, %13
+  %.0 = phi i32 [ 10, %13 ], [ %25, %24 ]
+  %15 = icmp sgt i32 %.0, 0
+  br i1 %15, label %16, label %26
+
+16:                                               ; preds = %14
+  %17 = sub nsw i32 %.0, 1
+  %18 = sext i32 %17 to i64
+  %19 = getelementptr inbounds [11 x i32], ptr %2, i64 0, i64 %18
+  %20 = load i32, ptr %19, align 4
+  %21 = add nsw i32 %20, 1
+  %22 = sext i32 %.0 to i64
+  %23 = getelementptr inbounds [11 x i32], ptr %3, i64 0, i64 %22
+  store i32 %21, ptr %23, align 4
+  br label %24
+
+24:                                               ; preds = %16
+  %25 = add nsw i32 %.0, -1
+  br label %14, !llvm.loop !36
+
+26:                                               ; preds = %14
+  br label %27
+
+27:                                               ; preds = %26, %1
+  ret void
+}
+
 attributes #0 = { noinline nounwind uwtable "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
 attributes #1 = { "frame-pointer"="all" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
 
@@ -724,3 +833,7 @@ attributes #1 = { "frame-pointer"="all" "no-trapping-math"="true" "stack-protect
 !30 = distinct !{!30, !7}
 !31 = distinct !{!31, !7}
 !32 = distinct !{!32, !7}
+!33 = distinct !{!33, !7}
+!34 = distinct !{!34, !7}
+!35 = distinct !{!35, !7}
+!36 = distinct !{!36, !7}

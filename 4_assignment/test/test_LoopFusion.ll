@@ -896,6 +896,145 @@ define dso_local void @non_guarded_not_adjacent_test() #0 {
   ret void
 }
 
+; Function Attrs: noinline nounwind uwtable
+define dso_local void @fusible_decreasing(i32 noundef %0) #0 {
+  %2 = alloca i32, align 4
+  %3 = alloca [11 x i32], align 16
+  %4 = alloca [11 x i32], align 16
+  %5 = alloca i32, align 4
+  %6 = alloca i32, align 4
+  store i32 %0, ptr %2, align 4
+  %7 = load i32, ptr %2, align 4
+  %8 = icmp sgt i32 %7, 10
+  br i1 %8, label %9, label %38
+
+9:                                                ; preds = %1
+  store i32 10, ptr %5, align 4
+  br label %10
+
+10:                                               ; preds = %18, %9
+  %11 = load i32, ptr %5, align 4
+  %12 = icmp sgt i32 %11, 0
+  br i1 %12, label %13, label %21
+
+13:                                               ; preds = %10
+  %14 = load i32, ptr %5, align 4
+  %15 = load i32, ptr %5, align 4
+  %16 = sext i32 %15 to i64
+  %17 = getelementptr inbounds [11 x i32], ptr %3, i64 0, i64 %16
+  store i32 %14, ptr %17, align 4
+  br label %18
+
+18:                                               ; preds = %13
+  %19 = load i32, ptr %5, align 4
+  %20 = add nsw i32 %19, -1
+  store i32 %20, ptr %5, align 4
+  br label %10, !llvm.loop !33
+
+21:                                               ; preds = %10
+  store i32 10, ptr %6, align 4
+  br label %22
+
+22:                                               ; preds = %34, %21
+  %23 = load i32, ptr %6, align 4
+  %24 = icmp sgt i32 %23, 0
+  br i1 %24, label %25, label %37
+
+25:                                               ; preds = %22
+  %26 = load i32, ptr %6, align 4
+  %27 = sext i32 %26 to i64
+  %28 = getelementptr inbounds [11 x i32], ptr %3, i64 0, i64 %27
+  %29 = load i32, ptr %28, align 4
+  %30 = add nsw i32 %29, 1
+  %31 = load i32, ptr %6, align 4
+  %32 = sext i32 %31 to i64
+  %33 = getelementptr inbounds [11 x i32], ptr %4, i64 0, i64 %32
+  store i32 %30, ptr %33, align 4
+  br label %34
+
+34:                                               ; preds = %25
+  %35 = load i32, ptr %6, align 4
+  %36 = add nsw i32 %35, -1
+  store i32 %36, ptr %6, align 4
+  br label %22, !llvm.loop !34
+
+37:                                               ; preds = %22
+  br label %38
+
+38:                                               ; preds = %37, %1
+  ret void
+}
+
+; Function Attrs: noinline nounwind uwtable
+define dso_local void @negative_decreasing(i32 noundef %0) #0 {
+  %2 = alloca i32, align 4
+  %3 = alloca [11 x i32], align 16
+  %4 = alloca [11 x i32], align 16
+  %5 = alloca i32, align 4
+  %6 = alloca i32, align 4
+  store i32 %0, ptr %2, align 4
+  %7 = load i32, ptr %2, align 4
+  %8 = icmp sgt i32 %7, 10
+  br i1 %8, label %9, label %39
+
+9:                                                ; preds = %1
+  store i32 10, ptr %5, align 4
+  br label %10
+
+10:                                               ; preds = %18, %9
+  %11 = load i32, ptr %5, align 4
+  %12 = icmp sgt i32 %11, 0
+  br i1 %12, label %13, label %21
+
+13:                                               ; preds = %10
+  %14 = load i32, ptr %5, align 4
+  %15 = load i32, ptr %5, align 4
+  %16 = sext i32 %15 to i64
+  %17 = getelementptr inbounds [11 x i32], ptr %3, i64 0, i64 %16
+  store i32 %14, ptr %17, align 4
+  br label %18
+
+18:                                               ; preds = %13
+  %19 = load i32, ptr %5, align 4
+  %20 = add nsw i32 %19, -1
+  store i32 %20, ptr %5, align 4
+  br label %10, !llvm.loop !35
+
+21:                                               ; preds = %10
+  store i32 10, ptr %6, align 4
+  br label %22
+
+22:                                               ; preds = %35, %21
+  %23 = load i32, ptr %6, align 4
+  %24 = icmp sgt i32 %23, 0
+  br i1 %24, label %25, label %38
+
+25:                                               ; preds = %22
+  %26 = load i32, ptr %6, align 4
+  %27 = sub nsw i32 %26, 1
+  %28 = sext i32 %27 to i64
+  %29 = getelementptr inbounds [11 x i32], ptr %3, i64 0, i64 %28
+  %30 = load i32, ptr %29, align 4
+  %31 = add nsw i32 %30, 1
+  %32 = load i32, ptr %6, align 4
+  %33 = sext i32 %32 to i64
+  %34 = getelementptr inbounds [11 x i32], ptr %4, i64 0, i64 %33
+  store i32 %31, ptr %34, align 4
+  br label %35
+
+35:                                               ; preds = %25
+  %36 = load i32, ptr %6, align 4
+  %37 = add nsw i32 %36, -1
+  store i32 %37, ptr %6, align 4
+  br label %22, !llvm.loop !36
+
+38:                                               ; preds = %22
+  br label %39
+
+39:                                               ; preds = %38, %1
+  ret void
+}
+
 attributes #0 = { noinline nounwind uwtable "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
 attributes #1 = { "frame-pointer"="all" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
 
@@ -935,3 +1074,7 @@ attributes #1 = { "frame-pointer"="all" "no-trapping-math"="true" "stack-protect
 !30 = distinct !{!30, !7}
 !31 = distinct !{!31, !7}
 !32 = distinct !{!32, !7}
+!33 = distinct !{!33, !7}
+!34 = distinct !{!34, !7}
+!35 = distinct !{!35, !7}
+!36 = distinct !{!36, !7}

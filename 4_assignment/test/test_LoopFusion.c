@@ -351,3 +351,33 @@ void non_guarded_not_adjacent_test(void) {
         B[j] = j + 1;
     }
 }
+
+void fusible_decreasing(int N) {
+    int A[11];
+    int B[11];
+
+    if (N > 10) {
+        for (int i = 10; i > 0; i--) {
+            A[i] = i;
+        }
+
+        for (int j = 10; j > 0; j--) {
+            B[j] = A[j] + 1;
+        }
+    }
+}
+
+void negative_decreasing(int N) {
+    int A[11];
+    int B[11];
+
+    if (N > 10) {
+        for (int i = 10; i > 0; i--) {
+            A[i] = i;
+        }
+
+        for (int j = 10; j > 0; j--) {
+            B[j] = A[j - 1] + 1;
+        }
+    }
+}
