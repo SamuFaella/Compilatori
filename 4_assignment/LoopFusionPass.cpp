@@ -15,6 +15,8 @@
 
 #include "llvm/IR/Dominators.h"
 
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Passes/PassBuilder.h"
 
@@ -913,6 +915,252 @@ DependenceResult checkDependences(Loop *L0,
     return DependenceResult::Safe;
 }
 
+// Ritorna il body principale del loop.
+// Gestisce loop semplici del tipo:
+//
+//   header:
+//     br cond, body, exit
+//
+// dove body è dentro il loop ed exit è fuori.
+BasicBlock *getSimpleLoopBody(Loop *L) {
+    BasicBlock *Header = L->getHeader();
+
+    // Il loop deve avere un header.
+    if (!Header)
+        return nullptr;
+
+    // Il terminator del header deve essere un branch condizionale.
+    BranchInst *BI = dyn_cast<BranchInst>(Header->getTerminator());
+    if (!BI || !BI->isConditional())
+        return nullptr;
+
+    BasicBlock *Succ0 = BI->getSuccessor(0);
+    BasicBlock *Succ1 = BI->getSuccessor(1);
+
+    bool Succ0InLoop = L->contains(Succ0);
+    bool Succ1InLoop = L->contains(Succ1);
+
+    // Uno dei due successori deve essere dentro il loop, l'altro fuori.
+    if (Succ0InLoop && !Succ1InLoop)
+        return Succ0;
+
+    if (!Succ0InLoop && Succ1InLoop)
+        return Succ1;
+
+    return nullptr;
+}
+
+// Cambia il blocco predecessore dentro eventuali PHI.
+// Serve quando riscriviamo il CFG.
+void replacePhiIncomingBlock(BasicBlock *BB, BasicBlock *OldPred, BasicBlock *NewPred) {
+    
+    if(!BB || !OldPred || !NewPred)
+        return;
+
+    for (Instruction &I : *BB) {
+        PHINode *PHI = dyn_cast<PHINode>(&I);
+        if (!PHI)
+            break;
+
+        for(unsigned i = 0; i < PHI->getNumIncomingValues(); ++i) {
+            if (PHI->getIncomingBlock(i) == OldPred) {
+                PHI->setIncomingBlock(i, NewPred);
+            }
+        }
+    }
+
+}
+
+// Sostituisce gli usi della IV di L1 nel body di L1 con la IV di L0.
+// Non tocca header/latch di L1 perché dopo la fusione diventano inutili.
+void replaceIVUsesInSecondLoopBody(Loop *L1,
+                                   PHINode *IV1,
+                                   PHINode *IV0) {
+    BasicBlock *Header1 = L1->getHeader();
+    BasicBlock *Latch1 = L1->getLoopLatch();
+
+    for (BasicBlock *BB : L1->blocks()) {
+        if (BB == Header1 || BB == Latch1)
+            continue;
+
+        for (Instruction &I : *BB) {
+            for (Use &U : I.operands()) {
+                if (U.get() == IV1) {
+                    U.set(IV0);
+                }
+            }
+        }
+    }
+}
+
+bool fuseLoops(Loop *L0,
+               Loop *L1,
+               LoopInfo &LI,
+               ScalarEvolution &SE) {
+    errs() << "Provo a fondere i loop...\n";
+
+    BasicBlock *Header0 = L0->getHeader();
+    BasicBlock *Header1 = L1->getHeader();
+
+    BasicBlock *Body0 = getSimpleLoopBody(L0);
+    BasicBlock *Body1 = getSimpleLoopBody(L1);
+
+    BasicBlock *Latch0 = L0->getLoopLatch();
+    BasicBlock *Latch1 = L1->getLoopLatch();
+
+    BasicBlock *Exit0 = L0->getExitBlock();
+    BasicBlock *Exit1 = L1->getExitBlock();
+
+    if (!Header0 || !Header1 || !Body0 || !Body1 ||
+        !Latch0 || !Latch1 || !Exit0 || !Exit1) {
+        errs() << "Fusion fallita: struttura del loop non semplice\n";
+        return false;
+    }
+
+    /*
+     * Per fare una sostituzione diretta IV1 -> IV0,
+     * le IV devono avere stesso start e stesso step.
+     *
+     * Esempio supportato:
+     *
+     *   for (int i = N; i < M; i++)
+     *   for (int j = N; j < M; j++)
+     *
+     * Esempio NON supportato direttamente:
+     *
+     *   for (int i = 0; i < 10; i++)
+     *   for (int j = 5; j < 15; j++)
+     *
+     * In quel caso servirebbe sostituire j con i + 5, non solo con i.
+     */
+    auto IVInfo0 = findSimpleIV(L0, SE);
+    auto IVInfo1 = findSimpleIV(L1, SE);
+
+    if (!IVInfo0 || !IVInfo1) {
+        errs() << "Fusion fallita: IV semplice non trovata\n";
+        return false;
+    }
+
+    if (IVInfo0->Step != IVInfo1->Step) {
+        errs() << "Fusion fallita: step delle IV diverso\n";
+        return false;
+    }
+
+    bool SameStart =
+        (IVInfo0->Start == IVInfo1->Start) ||
+        SE.isKnownPredicate(ICmpInst::ICMP_EQ,
+                            IVInfo0->Start,
+                            IVInfo1->Start);
+
+    if (!SameStart) {
+        errs() << "Fusion fallita: start delle IV diverso o non dimostrabile uguale\n";
+        return false;
+    }
+
+    PHINode *IV0 = IVInfo0->IV;
+    PHINode *IV1 = IVInfo1->IV;
+
+    /*
+     * 1. Sostituisco gli usi della IV del secondo loop
+     *    nel body del secondo loop.
+     */
+    replaceIVUsesInSecondLoopBody(L1, IV1, IV0);
+
+    /*
+     * 2. Modifico il CFG.
+     *
+     * Prima:
+     *
+     *   L0 header --false--> Exit0 / preheader L1
+     *   L0 body   ---------> L0 latch
+     *
+     *   L1 header --true---> L1 body
+     *   L1 body   ---------> L1 latch
+     *   L1 header --false--> Exit1
+     *
+     * Dopo:
+     *
+     *   L0 header --false--> Exit1
+     *   L0 body   ---------> L1 body
+     *   L1 body   ---------> L0 latch
+     *
+     * In questo modo, a ogni iterazione di L0, eseguo:
+     *
+     *   body L0
+     *   body L1
+     *   latch L0
+     */
+
+    BranchInst *Header0BI = dyn_cast<BranchInst>(Header0->getTerminator());
+    BranchInst *Body0BI = dyn_cast<BranchInst>(Body0->getTerminator());
+    BranchInst *Body1BI = dyn_cast<BranchInst>(Body1->getTerminator());
+
+    if (!Header0BI || !Header0BI->isConditional()) {
+        errs() << "Fusion fallita: header L0 non termina con branch condizionale\n";
+        return false;
+    }
+
+    if (!Body0BI || !Body0BI->isUnconditional()) {
+        errs() << "Fusion fallita: body L0 non termina con branch incondizionale\n";
+        return false;
+    }
+
+    if (!Body1BI || !Body1BI->isUnconditional()) {
+        errs() << "Fusion fallita: body L1 non termina con branch incondizionale\n";
+        return false;
+    }
+
+    /*
+     * Header0: il ramo di uscita di L0 deve andare all'uscita finale di L1.
+     */
+    bool ReplacedExit = false;
+
+    for (unsigned S = 0; S < Header0BI->getNumSuccessors(); ++S) {
+        if (Header0BI->getSuccessor(S) == Exit0) {
+            Header0BI->setSuccessor(S, Exit1);
+            ReplacedExit = true;
+            break;
+        }
+    }
+
+    if (!ReplacedExit) {
+        errs() << "Fusion fallita: non trovo Exit0 come successore di Header0\n";
+        return false;
+    }
+
+    /*
+     * Body0: invece di andare al latch di L0, va al body di L1.
+     */
+    if (Body0BI->getSuccessor(0) != Latch0) {
+        errs() << "Fusion fallita: body L0 non va direttamente al latch L0\n";
+        return false;
+    }
+
+    Body0BI->setSuccessor(0, Body1);
+
+    /*
+     * Body1: invece di andare al latch di L1, va al latch di L0.
+     */
+    if (Body1BI->getSuccessor(0) != Latch1) {
+        errs() << "Fusion fallita: body L1 non va direttamente al latch L1\n";
+        return false;
+    }
+
+    Body1BI->setSuccessor(0, Latch0);
+
+    /*
+     * Aggiorno eventuali PHI nei blocchi che hanno cambiato predecessore.
+     * Nei tuoi test semplici probabilmente non servono, ma tenerle evita
+     * alcuni IR invalidi in casi leggermente più complessi.
+     */
+    replacePhiIncomingBlock(Body1, Header1, Body0);
+    replacePhiIncomingBlock(Latch0, Body0, Body1);
+    replacePhiIncomingBlock(Exit1, Header1, Header0);
+
+    errs() << "Fusion eseguita\n";
+    return true;
+}
+
 struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
         LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
@@ -996,6 +1244,24 @@ struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
 
             // Tutte le condizioni sono passate.
             errs() << "Loop fondibili: posso procedere alla trasformazione\n";
+
+            errs() << "Loop fondibili: procedo con la trasformazione\n";
+
+            if (fuseLoops(L0, L1, LI, SE)) {
+                errs() << "Trasformazione completata\n";
+
+                bool Removed = EliminateUnreachableBlocks(F);
+
+                if (Removed)
+                    errs() << "Cleanup: blocchi non raggiungibili eliminati\n";
+                else
+                    errs() << "Cleanup: nessun blocco non raggiungibile da eliminare\n";
+
+                return PreservedAnalyses::none();
+            }
+
+            errs() << "Trasformazione non eseguita\n";
+continue;
         }
 
         return PreservedAnalyses::all();
