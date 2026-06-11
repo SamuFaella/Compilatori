@@ -12,6 +12,9 @@
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/DependenceAnalysis.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Analysis/AliasAnalysis.h"
+
+#include <functional>
 
 #include "llvm/IR/Dominators.h"
 
@@ -78,6 +81,26 @@ struct SimpleAccess {
     const SCEV *Start = nullptr;
     int64_t Step = 0;
     int64_t Offset = 0;
+
+    bool IsLoad = false;
+    bool IsStore = false;
+};
+
+// Indice associato a una specifica profondità del loop nest.
+struct MultiIndexExpr {
+    bool Valid = false;
+
+    const SCEV *Start = nullptr;
+    int64_t Step = 0;
+    int64_t Offset = 0;
+};
+
+// Accesso memoria con offset distinti per ogni livello del nest.
+struct MultiAccess {
+    Instruction *Inst = nullptr;
+    Value *Base = nullptr;
+
+    SmallVector<MultiIndexExpr, 4> ByDepth;
 
     bool IsLoad = false;
     bool IsStore = false;
@@ -380,6 +403,168 @@ void printDependenceDirection(unsigned Dir) {
 
     errs() << "\n";
 }
+
+// Verifica se un loop ha la forma minima richiesta per la fusion.
+bool isEligibleLoop(Loop *L) {
+    if (!L)
+        return false;
+
+    if (!L->getHeader())
+        return false;
+
+    if (!L->getLoopPreheader())
+        return false;
+
+    if (!L->getLoopLatch())
+        return false;
+
+    if (!L->getExitingBlock())
+        return false;
+
+    if (!L->getExitBlock())
+        return false;
+
+    for (BasicBlock *BB : L->blocks()) {
+        for (Instruction &I : *BB) {
+            // controllo se l'istruzione può lanciare delle istruzioni
+            if (I.mayThrow())
+                return false;
+
+            if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
+                // se trova una load volatile, il loop non è sicuro
+                // load volatile -> lettura che il compilatore non può eliminare, spostare o riordinare liberamente, 
+                // perchè ha un effetto osservabile
+                if (LI->isVolatile())
+                    return false;
+            }
+
+            if (StoreInst *SI = dyn_cast<StoreInst>(&I)) {
+                // se trova una store volatile il loop non è sicuro
+                // store volatile -> non può essere riordinata liberamente.
+                if (SI->isVolatile())
+                    return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+// Hook di profittabilità: per ora abilita la maximal fusion.
+bool isProfitableToFuse(Loop *L0, Loop *L1) {
+    return true;
+}
+
+// Due loop sono candidati insieme solo se sono fratelli.
+bool haveSameParentLoop(Loop *L0, Loop *L1) {
+    return L0->getParentLoop() == L1->getParentLoop();
+}
+
+// Raccoglie gruppi di loop fratelli:
+// - prima i loop top-level della funzione;
+// - poi, ricorsivamente, i sotto-loop che hanno lo stesso parent.
+void collectSiblingLoopGroups(LoopInfo &LI,
+                              SmallVectorImpl<SmallVector<Loop *, 8>> &Groups) {
+    SmallVector<Loop *, 8> TopLevel;
+
+    // Raccoglie tutti i loop esterni, cioè quelli non contenuti in altri loop.
+    for (Loop *L : LI)
+        TopLevel.push_back(L);
+
+    // Se ci sono almeno due loop top-level, possono essere confrontati tra loro.
+    if (TopLevel.size() >= 2)
+        Groups.push_back(TopLevel);
+
+    // Visita ricorsivamente la gerarchia dei loop.
+    std::function<void(Loop *)> Visit = [&](Loop *Parent) {
+        SmallVector<Loop *, 8> Children;
+
+        // Raccoglie i sotto-loop diretti del loop corrente.
+        for (Loop *SubL : Parent->getSubLoops())
+            Children.push_back(SubL);
+
+        // Se il parent ha almeno due figli, quei figli formano un gruppo di fratelli.
+        if (Children.size() >= 2)
+            Groups.push_back(Children);
+
+        // Continua la visita anche dentro ogni sotto-loop.
+        for (Loop *SubL : Parent->getSubLoops())
+            Visit(SubL);
+    };
+
+    // Avvia la visita ricorsiva da ogni loop top-level.
+    for (Loop *L : LI)
+        Visit(L);
+}
+
+// Versione senza stampe della control-flow equivalence.
+bool areControlFlowEquivalentQuiet(Loop *L0,
+                                   Loop *L1,
+                                   DominatorTree &DT,
+                                   PostDominatorTree &PDT) {
+    BasicBlock *H0 = L0->getHeader();
+    BasicBlock *H1 = L1->getHeader();
+
+    bool Forward = DT.dominates(H0, H1) && PDT.dominates(H1, H0);
+    bool Backward = DT.dominates(H1, H0) && PDT.dominates(H0, H1);
+
+    return Forward || Backward;
+}
+
+// Costruisce gruppi di loop control-flow equivalent.
+// Ogni gruppo contiene loop che vengono eseguiti nello stesso contesto di controllo.
+void buildCFESets(SmallVectorImpl<Loop *> &Candidates,
+                  SmallVectorImpl<SmallVector<Loop *, 8>> &CFESets,
+                  DominatorTree &DT,
+                  PostDominatorTree &PDT,
+                  DenseMap<BasicBlock *, unsigned> &BlockOrder) {
+    
+    // Analizza ogni loop candidato.
+    for (Loop *L : Candidates) {
+        bool Inserted = false;
+
+        // Prova a inserire L in uno dei gruppi già esistenti.
+        for (auto &Set : CFESets) {
+            if (Set.empty())
+                continue;
+
+            // Basta confrontare L con il primo loop del gruppo:
+            // se sono control-flow equivalent, L appartiene a quel gruppo.
+            if (areControlFlowEquivalentQuiet(Set[0], L, DT, PDT)) {
+                Set.push_back(L);
+                Inserted = true;
+                break;
+            }
+        }
+
+        // Se L non appartiene a nessun gruppo esistente,
+        // crea un nuovo gruppo contenente solo L.
+        if (!Inserted) {
+            SmallVector<Loop *, 8> NewSet;
+            NewSet.push_back(L);
+            CFESets.push_back(NewSet);
+        }
+    }
+
+    // Ordina i loop dentro ogni gruppo secondo l'ordine del CFG.
+    for (auto &Set : CFESets) {
+        std::sort(Set.begin(), Set.end(),
+                  [&](Loop *A, Loop *B) {
+                      // Se A domina B, A viene prima.
+                      if (DT.dominates(A->getHeader(), B->getHeader()))
+                          return true;
+
+                      // Se B domina A, B viene prima.
+                      if (DT.dominates(B->getHeader(), A->getHeader()))
+                          return false;
+
+                      // Se non c'è dominanza diretta, usa l'ordine dei blocchi.
+                      return BlockOrder[A->getHeader()] <
+                             BlockOrder[B->getHeader()];
+                  });
+    }
+}
+
 /**
  * @brief Serve a trovare una semplice induction variable dentro un loop LLVM.
  * Riconosce una PHI del tipo:  i = phi [StartValue, Preheader], [i + 1, Latch]
@@ -695,6 +880,429 @@ std::optional<SimpleAccess> getSimpleAccessInfo(Instruction *I,
 }
 
 
+
+// Costruisce la catena di loop da Root fino al loop che contiene I.
+// Esempio: Root=L0, I dentro L2  => Chain = {L0, L1, L2}
+bool getLoopChainForInstruction(Loop *Root,
+                                Instruction *I,
+                                LoopInfo &LI,
+                                SmallVectorImpl<Loop *> &Chain) {
+    // Trova il loop più interno che contiene il basic block dell'istruzione.
+    Loop *Cur = LI.getLoopFor(I->getParent());
+
+    SmallVector<Loop *, 4> ReverseChain;
+
+    // Risale dai loop più interni verso quelli più esterni.
+    while (Cur) {
+        ReverseChain.push_back(Cur);
+
+        // Se abbiamo raggiunto Root, la catena è valida.
+        if (Cur == Root)
+            break;
+
+        Cur = Cur->getParentLoop();
+    }
+
+    // Se Root non è stato trovato, I non appartiene alla gerarchia di Root.
+    if (ReverseChain.empty() || ReverseChain.back() != Root)
+        return false;
+
+    // Inverte l'ordine: da Root -> ... -> loop più interno.
+    for (auto It = ReverseChain.rbegin(); It != ReverseChain.rend(); ++It)
+        Chain.push_back(*It);
+
+    return true;
+}
+
+// Raccoglie gli indici da tutta la catena di GEP.
+// Serve per casi in cui un accesso A[i][j] viene spezzato in più GEP.
+bool collectAllGEPIndices(Value *Ptr,
+                          SmallVectorImpl<Value *> &Indices) {
+    if (!Ptr)
+        return false;
+
+    // Serve normalizzare un puntatore
+    Ptr = Ptr->stripPointerCasts();
+
+    GEPOperator *GEP = dyn_cast<GEPOperator>(Ptr);
+    if (!GEP)
+        return false;
+
+    /*
+     * Se il puntatore base del GEP è a sua volta un GEP,
+     * prima raccolgo gli indici più esterni.
+     *
+     * Esempio:
+     *   %row = gep A, 0, i + 1
+     *   %elt = gep %row, 0, j
+     *
+     * Risultato:
+     *   0, i + 1, 0, j
+     */
+    collectAllGEPIndices(GEP->getPointerOperand(), Indices);
+
+    for (auto Idx = GEP->idx_begin(); Idx != GEP->idx_end(); ++Idx)
+        Indices.push_back(Idx->get());
+
+    return true;
+}
+
+// Prova a riconoscere espressioni del tipo:
+//   IV
+//   IV + c
+//   IV - c
+//   c + IV
+// Restituisce la costante c, oppure nullopt se il pattern non è riconosciuto.
+std::optional<int64_t> getConstantOffsetByPattern(Value *V,
+                                                  PHINode *IV) {
+    // Controllo di sicurezza sugli argomenti.
+    if (!V || !IV)
+        return std::nullopt;
+
+    // Elimina eventuali cast sul valore, se presenti.
+    V = V->stripPointerCasts();
+
+    // Caso base: il valore è proprio la induction variable.
+    if (V == IV)
+        return 0;
+
+    /*
+     * Una costante da sola non è della forma IV + c.
+     * Esempio: 5 non dipende da IV.
+     */
+    if (isa<ConstantInt>(V))
+        return std::nullopt;
+
+    /*
+     * Caso frequente:
+     *   %idx64 = sext i32 %i to i64
+     *
+     * Ignora il cast e continua l'analisi sull'operando originale.
+     */
+    if (CastInst *Cast = dyn_cast<CastInst>(V))
+        return getConstantOffsetByPattern(Cast->getOperand(0), IV);
+
+    // Da qui in poi accettiamo solo operazioni binarie.
+    BinaryOperator *BO = dyn_cast<BinaryOperator>(V);
+    if (!BO)
+        return std::nullopt;
+
+    Value *LHS = BO->getOperand(0);
+    Value *RHS = BO->getOperand(1);
+
+    // Prova a riconoscere ricorsivamente IV + c nei due operandi.
+    auto LOff = getConstantOffsetByPattern(LHS, IV);
+    auto ROff = getConstantOffsetByPattern(RHS, IV);
+
+    // Controlla se uno dei due operandi è una costante intera.
+    ConstantInt *LC = dyn_cast<ConstantInt>(LHS);
+    ConstantInt *RC = dyn_cast<ConstantInt>(RHS);
+
+    // Caso: (IV + c1) + c2 oppure c2 + (IV + c1)
+    if (BO->getOpcode() == Instruction::Add) {
+        if (LOff && RC)
+            return *LOff + RC->getSExtValue();
+
+        if (ROff && LC)
+            return *ROff + LC->getSExtValue();
+    }
+
+    // Caso: (IV + c1) - c2
+    if (BO->getOpcode() == Instruction::Sub) {
+        if (LOff && RC)
+            return *LOff - RC->getSExtValue();
+    }
+
+    // Pattern non riconosciuto.
+    return std::nullopt;
+}
+
+// Prova a riconoscere IndexValue = IV + c usando ScalarEvolution.
+// Restituisce c, oppure nullopt se la differenza non è costante.
+std::optional<int64_t> getConstantOffsetBySCEV(Value *IndexValue,
+                                               PHINode *IV,
+                                               ScalarEvolution &SE) {
+    // Controllo di sicurezza sugli argomenti.
+    if (!IndexValue || !IV)
+        return std::nullopt;
+
+    // Converte i valori LLVM in espressioni SCEV.
+    const SCEV *IndexS = SE.getSCEV(IndexValue);
+    const SCEV *IVS = SE.getSCEV(IV);
+
+    Type *IndexTy = IndexS->getType();
+    Type *IVTy = IVS->getType();
+
+    // Se i tipi sono diversi, prova a portarli alla stessa larghezza.
+    if (IndexTy != IVTy) {
+        IntegerType *IndexIntTy = dyn_cast<IntegerType>(IndexTy);
+        IntegerType *IVIntTy = dyn_cast<IntegerType>(IVTy);
+
+        // Se non sono interi, non possiamo confrontarli in modo semplice.
+        if (!IndexIntTy || !IVIntTy)
+            return std::nullopt;
+
+        // Sceglie il tipo intero più largo tra i due.
+        unsigned Width = std::max(IndexIntTy->getBitWidth(),
+                                  IVIntTy->getBitWidth());
+
+        Type *WideTy = IntegerType::get(IndexValue->getContext(), Width);
+
+        // Estende le due espressioni allo stesso tipo.
+        IndexS = SE.getNoopOrSignExtend(IndexS, WideTy);
+        IVS = SE.getNoopOrSignExtend(IVS, WideTy);
+    }
+
+    // Calcola: IndexValue - IV.
+    const SCEV *Diff = SE.getMinusSCEV(IndexS, IVS);
+
+    // Se la differenza è una costante, allora IndexValue = IV + costante.
+    if (const SCEVConstant *C = dyn_cast<SCEVConstant>(Diff))
+        return C->getAPInt().getSExtValue();
+
+    // Altrimenti non è un offset costante riconoscibile.
+    return std::nullopt;
+}
+
+// Prova prima ScalarEvolution, poi pattern matching manuale.
+std::optional<int64_t> getConstantOffsetFromIV(Value *IndexValue,
+                                               PHINode *IV,
+                                               ScalarEvolution &SE) {
+    if (auto Off = getConstantOffsetBySCEV(IndexValue, IV, SE))
+        return Off;
+
+    return getConstantOffsetByPattern(IndexValue, IV);
+}
+
+// Estrae informazioni da una load/store multidimensionale.
+// Riconosce base dell'array, tipo di accesso e offset per ogni livello del nest.
+std::optional<MultiAccess> getMultiAccessInfo(Instruction *I,
+                                              Loop *Root,
+                                              LoopInfo &LI,
+                                              ScalarEvolution &SE) {
+    Value *Ptr = nullptr;
+    bool IsLoad = false;
+    bool IsStore = false;
+
+    // Accetta solo istruzioni load o store.
+    if (LoadInst *Load = dyn_cast<LoadInst>(I)) {
+        Ptr = Load->getPointerOperand();
+        IsLoad = true;
+    } else if (StoreInst *Store = dyn_cast<StoreInst>(I)) {
+        Ptr = Store->getPointerOperand();
+        IsStore = true;
+    } else {
+        return std::nullopt;
+    }
+
+    SmallVector<Value *, 8> GEPIndices;
+
+    // Raccoglie tutti gli indici dei GEP, anche se ci sono GEP concatenati.
+    if (!collectAllGEPIndices(Ptr, GEPIndices))
+        return std::nullopt;
+
+    SmallVector<Loop *, 4> Chain;
+
+    // Costruisce la catena Root -> ... -> loop che contiene l'istruzione.
+    if (!getLoopChainForInstruction(Root, I, LI, Chain))
+        return std::nullopt;
+
+    SmallVector<SimpleIVInfo, 4> IVInfos;
+
+    // Per ogni loop della catena cerca una induction variable semplice.
+    for (Loop *L : Chain) {
+        auto IV = findSimpleIV(L, SE);
+
+        if (!IV)
+            return std::nullopt;
+
+        IVInfos.push_back(*IV);
+    }
+
+    MultiAccess A;
+    A.Inst = I;
+
+    // Trova l'oggetto base dell'accesso, ad esempio A in A[i][j].
+    A.Base = getUnderlyingObject(Ptr)->stripPointerCasts();
+
+    A.IsLoad = IsLoad;
+    A.IsStore = IsStore;
+
+    // Prepara un'informazione per ogni livello di annidamento.
+    A.ByDepth.resize(IVInfos.size());
+
+    /*
+     * Per ogni livello del loop nest cerca un indice GEP della forma:
+     *
+     *   IV_depth + costante
+     *
+     * Esempi:
+     *   i       -> offset 0
+     *   i + 1   -> offset 1
+     *   j - 1   -> offset -1
+     */
+    for (unsigned Depth = 0; Depth < IVInfos.size(); ++Depth) {
+        PHINode *IV = IVInfos[Depth].IV;
+        bool FoundIndexForDepth = false;
+
+        // Cerca tra tutti gli indici GEP quello legato alla IV corrente.
+        for (Value *IndexValue : GEPIndices) {
+            std::optional<int64_t> Offset =
+                getConstantOffsetFromIV(IndexValue, IV, SE);
+
+            if (!Offset)
+                continue;
+
+            // Salva start, step e offset per questo livello del nest.
+            A.ByDepth[Depth].Valid = true;
+            A.ByDepth[Depth].Start = IVInfos[Depth].Start;
+            A.ByDepth[Depth].Step = IVInfos[Depth].Step;
+            A.ByDepth[Depth].Offset = *Offset;
+
+            FoundIndexForDepth = true;
+            break;
+        }
+
+        // Se manca l'indice per un livello, l'accesso non è analizzabile.
+        if (!FoundIndexForDepth)
+            return std::nullopt;
+    }
+
+    return A;
+}
+
+// Confronta due indici invarianti tramite valore o SCEV.
+bool sameInvariantIndex(Value *V0,
+                        Value *V1,
+                        ScalarEvolution &SE) {
+    if (V0 == V1)
+        return true;
+
+    ConstantInt *C0 = dyn_cast<ConstantInt>(V0);
+    ConstantInt *C1 = dyn_cast<ConstantInt>(V1);
+
+    if (C0 && C1)
+        return C0->getSExtValue() == C1->getSExtValue();
+
+    const SCEV *S0 = SE.getSCEV(V0);
+    const SCEV *S1 = SE.getSCEV(V1);
+
+    if (S0 == S1)
+        return true;
+
+    return SE.isKnownPredicate(ICmpInst::ICMP_EQ, S0, S1);
+}
+
+// Classifica dipendenze tra accessi multidimensionali tipo A[i][j+c].
+// Usa l'ordine delle depth del loop nest: prima loop esterno, poi interno.
+SimpleDepResult classifyMultiDimDependence(Instruction *I0,
+                                           Instruction *I1,
+                                           Loop *L0,
+                                           Loop *L1,
+                                           LoopInfo &LI,
+                                           ScalarEvolution &SE) {
+    // Estrae base, tipo accesso e offset per ogni depth del loop nest.
+    auto A0 = getMultiAccessInfo(I0, L0, LI, SE);
+    auto A1 = getMultiAccessInfo(I1, L1, LI, SE);
+
+    // Se uno dei due accessi non è analizzabile, non classifico.
+    if (!A0 || !A1)
+        return SimpleDepResult::Unknown;
+
+    /*
+     * Se le basi sono diverse:
+     * - due alloca diverse sono indipendenti;
+     * - puntatori diversi, invece, potrebbero aliasare.
+     */
+    if (A0->Base != A1->Base) {
+        if (isa<AllocaInst>(A0->Base) && isa<AllocaInst>(A1->Base))
+            return SimpleDepResult::Safe;
+
+        return SimpleDepResult::Unknown;
+    }
+
+    // Gli accessi devono avere lo stesso numero di depth.
+    if (A0->ByDepth.size() != A1->ByDepth.size())
+        return SimpleDepResult::Unknown;
+
+    errs() << "Analisi multidimensionale per depth del nest:\n";
+    errs() << "  I0: " << *I0 << "\n";
+    errs() << "  I1: " << *I1 << "\n";
+
+    /*
+     * Confronta gli indici in ordine lessicografico.
+     * La prima depth con offset diverso decide la direzione.
+     */
+    for (unsigned Depth = 0; Depth < A0->ByDepth.size(); ++Depth) {
+        const MultiIndexExpr &X = A0->ByDepth[Depth];
+        const MultiIndexExpr &Y = A1->ByDepth[Depth];
+
+        // Se manca qualche informazione, non classifico.
+        if (!X.Valid || !Y.Valid)
+            return SimpleDepResult::Unknown;
+
+        // I due loop devono partire dallo stesso valore.
+        bool SameStart =
+            (X.Start == Y.Start) ||
+            SE.isKnownPredicate(ICmpInst::ICMP_EQ, X.Start, Y.Start);
+
+        if (!SameStart)
+            return SimpleDepResult::Unknown;
+
+        // Per ora gestisce solo step uguali.
+        if (X.Step != Y.Step)
+            return SimpleDepResult::Unknown;
+
+        // Differenza tra offset del secondo accesso e del primo.
+        int64_t Diff = Y.Offset - X.Offset;
+
+        errs() << "  Depth " << Depth
+               << " step=" << X.Step
+               << " offset L0=" << X.Offset
+               << " offset L1=" << Y.Offset
+               << "\n";
+
+        // Se gli offset sono uguali, passo alla depth successiva.
+        if (Diff == 0)
+            continue;
+
+        /*
+         * Loop crescente:
+         * se L1 accede a un offset maggiore, dipende da una futura iterazione di L0.
+         */
+        if (X.Step == 1) {
+            if (Diff > 0) {
+                errs() << "Dipendenza negativa su depth "
+                       << Depth << ", step +1\n";
+                return SimpleDepResult::Negative;
+            }
+
+            return SimpleDepResult::Safe;
+        }
+
+        /*
+         * Loop decrescente:
+         * se L1 accede a un offset minore, dipende da una futura iterazione di L0.
+         */
+        if (X.Step == -1) {
+            if (Diff < 0) {
+                errs() << "Dipendenza negativa su depth "
+                       << Depth << ", step -1\n";
+                return SimpleDepResult::Negative;
+            }
+
+            return SimpleDepResult::Safe;
+        }
+
+        // Step diversi da +1 o -1 non vengono gestiti.
+        return SimpleDepResult::Unknown;
+    }
+
+    // Tutti gli offset sono uguali: dipendenza a distanza zero.
+    errs() << "Dipendenza a distanza zero multidimensionale: sicura\n";
+    return SimpleDepResult::Safe;
+}
+
 /**
  * @brief Classificazione semplice per i casi Levels == 0.
  * Serve quando LLVM DependenceAnalysis trova una dipendenza, ma non riesce a darci direzione/distanza
@@ -710,7 +1318,14 @@ SimpleDepResult classifySimpleDependence(Instruction *I0,
                                           Instruction *I1,
                                           Loop *L0,
                                           Loop *L1,
+                                          LoopInfo &LI,
                                           ScalarEvolution &SE) {
+    SimpleDepResult Multi =
+        classifyMultiDimDependence(I0, I1, L0, L1, LI, SE);
+
+    if (Multi != SimpleDepResult::Unknown)
+        return Multi;
+
     auto A0 = getSimpleAccessInfo(I0, L0, SE);
     auto A1 = getSimpleAccessInfo(I1, L1, SE);
 
@@ -803,6 +1418,7 @@ SimpleDepResult classifySimpleDependence(Instruction *I0,
 // prova il fallback sugli indici A[i+c].
 DependenceResult checkDependences(Loop *L0,
                                   Loop *L1,
+                                  LoopInfo &LI,
                                   DependenceInfo &DI,
                                   ScalarEvolution &SE) {
     SmallVector<Instruction *, 16> MemInsts0;
@@ -838,7 +1454,7 @@ DependenceResult checkDependences(Loop *L0,
                 errs() << "Dipendenza non classificabile da LLVM, provo analisi semplice\n";
 
                 // Provo a riconoscerla tramite base array e offset degli indici.
-                SimpleDepResult Simple = classifySimpleDependence(I0, I1, L0, L1, SE);
+                SimpleDepResult Simple = classifySimpleDependence(I0, I1, L0, L1, LI, SE);
 
                 if (Simple == SimpleDepResult::Negative) {
                     errs() << "Dipendenza negativa/backward trovata\n";
@@ -860,24 +1476,23 @@ DependenceResult checkDependences(Loop *L0,
             for (unsigned Level = 1; Level <= Levels; ++Level) {
                 unsigned Dir = Dep->getDirection(Level);
 
+                bool HasLT = Dir & Dependence::DVEntry::LT;
+                bool HasEQ = Dir & Dependence::DVEntry::EQ;
+                bool HasGT = Dir & Dependence::DVEntry::GT;
+
                 errs() << "Direzione livello " << Level << ": ";
 
-                bool HasKnownDirectionAtThisLevel = false;
-
-                if (Dir & Dependence::DVEntry::LT) {
+                if (HasLT)
                     errs() << "LT ";
-                    HasKnownDirectionAtThisLevel = true;
-                }
 
-                if (Dir & Dependence::DVEntry::EQ) {
+                if (HasEQ)
                     errs() << "EQ ";
-                    HasKnownDirectionAtThisLevel = true;
-                }
 
-                if (Dir & Dependence::DVEntry::GT) {
+                if (HasGT)
                     errs() << "GT ";
-                    HasKnownDirectionAtThisLevel = true;
-                }
+
+                if (!HasLT && !HasEQ && !HasGT)
+                    errs() << "unknown";
 
                 errs() << "\n";
 
@@ -888,18 +1503,49 @@ DependenceResult checkDependences(Loop *L0,
                 else
                     errs() << "Distanza non calcolabile\n";
 
-                // GT indica una dipendenza backward/negativa.
-                if (Dir & Dependence::DVEntry::GT) {
+                /*
+                * Caso chiaro:
+                * solo GT significa dipendenza backward certa.
+                */
+                if (HasGT && !HasLT && !HasEQ) {
                     errs() << "Dipendenza negativa/backward trovata\n";
                     return DependenceResult::Negative;
                 }
 
-                // Direzione assente/non interpretabile: blocco conservativamente.
-                if (!HasKnownDirectionAtThisLevel) {
-                    errs() << "Direzione non chiara: salvo UnknownUnsafe\n";
+                /*
+                * Caso ambiguo:
+                * LLVM dice LT/EQ/GT, quindi non posso decidere solo dalla direction.
+                * Provo il fallback basato sugli indici.
+                */
+                if (HasGT && (HasLT || HasEQ)) {
+                    errs() << "Direzione ambigua con GT: provo fallback sugli indici\n";
+
+                    SimpleDepResult Simple =
+                        classifySimpleDependence(I0, I1, L0, L1, LI, SE);
+
+                    if (Simple == SimpleDepResult::Negative) {
+                        errs() << "Dipendenza negativa/backward trovata dal fallback\n";
+                        return DependenceResult::Negative;
+                    }
+
+                    if (Simple == SimpleDepResult::Safe) {
+                        errs() << "Dipendenza ambigua classificata come sicura dal fallback\n";
+                        continue;
+                    }
+
+                    errs() << "Dipendenza ambigua non classificabile\n";
                     FoundUnknownUnsafe = true;
                     continue;
                 }
+
+                /*
+                * LT o EQ senza GT non sono dipendenze negative per la fusion.
+                */
+                if (HasLT || HasEQ)
+                    continue;
+
+                errs() << "Direzione non chiara: salvo UnknownUnsafe\n";
+                FoundUnknownUnsafe = true;
             }
         }
     }
@@ -993,46 +1639,84 @@ void replaceIVUsesInSecondLoopBody(Loop *L1,
     }
 }
 
-bool fuseLoops(Loop *L0,
-               Loop *L1,
-               LoopInfo &LI,
-               ScalarEvolution &SE) {
+// Trova il blocco del body che va direttamente al latch del loop.
+// Serve quando il loop ha più blocchi nel body, ad esempio dopo una prima fusion.
+//ex: header -> body1 -< body2 -> latch -> header. La funzione vuole trovare body2, cioè il blocco immediatamente prima del latch
+BasicBlock *getBlockBeforeLatch(Loop *L) {
+    // Controllo di sicurezza.
+    if (!L)
+        return nullptr;
+
+    BasicBlock *Header = L->getHeader();
+    BasicBlock *Latch = L->getLoopLatch();
+
+    // Se il loop non ha header o latch unico, non è gestibile.
+    if (!Header || !Latch)
+        return nullptr;
+
+    BasicBlock *Candidate = nullptr;
+
+    // Scorre tutti i blocchi appartenenti al loop.
+    for (BasicBlock *BB : L->blocks()) {
+        // Header e latch non sono blocchi del body da scegliere.
+        if (BB == Header || BB == Latch)
+            continue;
+
+        // Considera solo branch incondizionati.
+        BranchInst *BI = dyn_cast<BranchInst>(BB->getTerminator());
+        if (!BI || !BI->isUnconditional())
+            continue;
+
+        // Cerca un blocco che salta direttamente al latch.
+        if (BI->getSuccessor(0) == Latch) {
+            // Se ce n'è più di uno, il caso è ambiguo.
+            if (Candidate)
+                return nullptr;
+
+            Candidate = BB;
+        }
+    }
+
+    // Ritorna il blocco trovato, oppure nullptr se non esiste.
+    return Candidate;
+}
+
+
+// Fonde due loop semplici L0 e L1 modificando direttamente il CFG.
+// Richiede stessa IV iniziale, stesso step e struttura CFG regolare.
+bool fuseSimpleLoops(Loop *L0,
+                     Loop *L1,
+                     LoopInfo &LI,
+                     ScalarEvolution &SE) {
     errs() << "Provo a fondere i loop...\n";
 
+    // Recupera header dei due loop.
     BasicBlock *Header0 = L0->getHeader();
     BasicBlock *Header1 = L1->getHeader();
 
+    // Recupera i body principali dei due loop.
     BasicBlock *Body0 = getSimpleLoopBody(L0);
     BasicBlock *Body1 = getSimpleLoopBody(L1);
 
+    // Recupera l'ultimo blocco del body di L0 prima del latch.
+    BasicBlock *Tail0 = getBlockBeforeLatch(L0);
+
+    // Recupera i latch dei due loop.
     BasicBlock *Latch0 = L0->getLoopLatch();
     BasicBlock *Latch1 = L1->getLoopLatch();
 
+    // Recupera i blocchi di uscita dei due loop.
     BasicBlock *Exit0 = L0->getExitBlock();
     BasicBlock *Exit1 = L1->getExitBlock();
 
-    if (!Header0 || !Header1 || !Body0 || !Body1 ||
+    // Se manca qualche blocco necessario, il loop non è abbastanza semplice.
+    if (!Header0 || !Header1 || !Body0 || !Body1 || !Tail0 ||
         !Latch0 || !Latch1 || !Exit0 || !Exit1) {
         errs() << "Fusion fallita: struttura del loop non semplice\n";
         return false;
     }
 
-    /*
-     * Per fare una sostituzione diretta IV1 -> IV0,
-     * le IV devono avere stesso start e stesso step.
-     *
-     * Esempio supportato:
-     *
-     *   for (int i = N; i < M; i++)
-     *   for (int j = N; j < M; j++)
-     *
-     * Esempio NON supportato direttamente:
-     *
-     *   for (int i = 0; i < 10; i++)
-     *   for (int j = 5; j < 15; j++)
-     *
-     * In quel caso servirebbe sostituire j con i + 5, non solo con i.
-     */
+    // Cerca le induction variable semplici dei due loop.
     auto IVInfo0 = findSimpleIV(L0, SE);
     auto IVInfo1 = findSimpleIV(L1, SE);
 
@@ -1041,11 +1725,13 @@ bool fuseLoops(Loop *L0,
         return false;
     }
 
+    // Per sostituire IV1 con IV0, gli step devono coincidere.
     if (IVInfo0->Step != IVInfo1->Step) {
         errs() << "Fusion fallita: step delle IV diverso\n";
         return false;
     }
 
+    // Controlla che le due IV partano dallo stesso valore.
     bool SameStart =
         (IVInfo0->Start == IVInfo1->Start) ||
         SE.isKnownPredicate(ICmpInst::ICMP_EQ,
@@ -1060,59 +1746,33 @@ bool fuseLoops(Loop *L0,
     PHINode *IV0 = IVInfo0->IV;
     PHINode *IV1 = IVInfo1->IV;
 
-    /*
-     * 1. Sostituisco gli usi della IV del secondo loop
-     *    nel body del secondo loop.
-     */
+    // Sostituisce nel secondo loop gli usi di IV1 con IV0.
     replaceIVUsesInSecondLoopBody(L1, IV1, IV0);
 
-    /*
-     * 2. Modifico il CFG.
-     *
-     * Prima:
-     *
-     *   L0 header --false--> Exit0 / preheader L1
-     *   L0 body   ---------> L0 latch
-     *
-     *   L1 header --true---> L1 body
-     *   L1 body   ---------> L1 latch
-     *   L1 header --false--> Exit1
-     *
-     * Dopo:
-     *
-     *   L0 header --false--> Exit1
-     *   L0 body   ---------> L1 body
-     *   L1 body   ---------> L0 latch
-     *
-     * In questo modo, a ogni iterazione di L0, eseguo:
-     *
-     *   body L0
-     *   body L1
-     *   latch L0
-     */
-
+    // Recupera i terminator dei blocchi che verranno modificati.
     BranchInst *Header0BI = dyn_cast<BranchInst>(Header0->getTerminator());
-    BranchInst *Body0BI = dyn_cast<BranchInst>(Body0->getTerminator());
+    BranchInst *Tail0BI = dyn_cast<BranchInst>(Tail0->getTerminator());
     BranchInst *Body1BI = dyn_cast<BranchInst>(Body1->getTerminator());
 
+    // Header0 deve avere il branch condizionale del loop.
     if (!Header0BI || !Header0BI->isConditional()) {
         errs() << "Fusion fallita: header L0 non termina con branch condizionale\n";
         return false;
     }
 
-    if (!Body0BI || !Body0BI->isUnconditional()) {
-        errs() << "Fusion fallita: body L0 non termina con branch incondizionale\n";
+    // Tail0 deve saltare direttamente al latch di L0.
+    if (!Tail0BI || !Tail0BI->isUnconditional()) {
+        errs() << "Fusion fallita: tail L0 non termina con branch incondizionale\n";
         return false;
     }
 
+    // Body1 deve saltare direttamente al latch di L1.
     if (!Body1BI || !Body1BI->isUnconditional()) {
         errs() << "Fusion fallita: body L1 non termina con branch incondizionale\n";
         return false;
     }
 
-    /*
-     * Header0: il ramo di uscita di L0 deve andare all'uscita finale di L1.
-     */
+    // Cambia l'uscita di L0: quando L0 termina, deve andare all'uscita finale di L1.
     bool ReplacedExit = false;
 
     for (unsigned S = 0; S < Header0BI->getNumSuccessors(); ++S) {
@@ -1128,19 +1788,15 @@ bool fuseLoops(Loop *L0,
         return false;
     }
 
-    /*
-     * Body0: invece di andare al latch di L0, va al body di L1.
-     */
-    if (Body0BI->getSuccessor(0) != Latch0) {
-        errs() << "Fusion fallita: body L0 non va direttamente al latch L0\n";
+    // Collega la fine del body di L0 al body di L1.
+    if (Tail0BI->getSuccessor(0) != Latch0) {
+        errs() << "Fusion fallita: tail L0 non va direttamente al latch L0\n";
         return false;
     }
 
-    Body0BI->setSuccessor(0, Body1);
+    Tail0BI->setSuccessor(0, Body1);
 
-    /*
-     * Body1: invece di andare al latch di L1, va al latch di L0.
-     */
+    // Collega la fine del body di L1 al latch di L0.
     if (Body1BI->getSuccessor(0) != Latch1) {
         errs() << "Fusion fallita: body L1 non va direttamente al latch L1\n";
         return false;
@@ -1148,18 +1804,218 @@ bool fuseLoops(Loop *L0,
 
     Body1BI->setSuccessor(0, Latch0);
 
-    /*
-     * Aggiorno eventuali PHI nei blocchi che hanno cambiato predecessore.
-     * Nei tuoi test semplici probabilmente non servono, ma tenerle evita
-     * alcuni IR invalidi in casi leggermente più complessi.
-     */
-    replacePhiIncomingBlock(Body1, Header1, Body0);
-    replacePhiIncomingBlock(Latch0, Body0, Body1);
+    // Aggiorna le PHI nei blocchi che hanno cambiato predecessori.
+    replacePhiIncomingBlock(Body1, Header1, Tail0);
+    replacePhiIncomingBlock(Latch0, Tail0, Body1);
     replacePhiIncomingBlock(Exit1, Header1, Header0);
 
     errs() << "Fusion eseguita\n";
     return true;
 }
+
+
+// True per nest a due livelli: un loop esterno con un solo subloop.
+bool isSimpleOneSubLoopNest(Loop *L) {
+    if (!L)
+        return false;
+
+    if (L->getSubLoops().size() != 1)
+        return false;
+
+    if (!L->getLoopPreheader())
+        return false;
+
+    if (!L->getLoopLatch())
+        return false;
+
+    if (!L->getExitBlock())
+        return false;
+
+    Loop *Inner = L->getSubLoops()[0];
+
+    if (!Inner->getLoopPreheader())
+        return false;
+
+    if (!Inner->getLoopLatch())
+        return false;
+
+    if (!Inner->getExitBlock())
+        return false;
+
+    return true;
+}
+
+// Sostituisce un valore dentro il body del loop, esclusi header/latch.
+void replaceValueUsesInsideLoopBody(Loop *L,
+                                    Value *OldV,
+                                    Value *NewV) {
+    BasicBlock *Header = L->getHeader();
+    BasicBlock *Latch = L->getLoopLatch();
+
+    for (BasicBlock *BB : L->blocks()) {
+        if (BB == Header || BB == Latch)
+            continue;
+
+        for (Instruction &I : *BB) {
+            for (Use &U : I.operands()) {
+                if (U.get() == OldV)
+                    U.set(NewV);
+            }
+        }
+    }
+}
+
+// Fonde due loop nest semplici:
+// ogni loop esterno deve contenere esattamente un loop interno.
+bool fuseOneSubLoopNests(Loop *L0,
+                         Loop *L1,
+                         LoopInfo &LI,
+                         ScalarEvolution &SE) {
+    errs() << "Provo a fondere due loop nest semplici...\n";
+
+    // Accetta solo nest del tipo: loop esterno con un solo subloop.
+    if (!isSimpleOneSubLoopNest(L0) || !isSimpleOneSubLoopNest(L1)) {
+        errs() << "Fusion nest fallita: struttura non supportata\n";
+        return false;
+    }
+
+    // Recupera i loop interni dei due nest.
+    Loop *Inner0 = L0->getSubLoops()[0];
+    Loop *Inner1 = L1->getSubLoops()[0];
+
+    // Recupera header, latch ed exit dei loop esterni.
+    BasicBlock *Header0 = L0->getHeader();
+    BasicBlock *Header1 = L1->getHeader();
+
+    BasicBlock *Latch0 = L0->getLoopLatch();
+    BasicBlock *Latch1 = L1->getLoopLatch();
+
+    BasicBlock *Exit0 = L0->getExitBlock();
+    BasicBlock *Exit1 = L1->getExitBlock();
+
+    // Blocchi importanti dei loop interni.
+    BasicBlock *InnerPreheader1 = Inner1->getLoopPreheader();
+    BasicBlock *InnerExit0 = Inner0->getExitBlock();
+    BasicBlock *InnerExit1 = Inner1->getExitBlock();
+
+    // Se manca qualche blocco necessario, non trasformo.
+    if (!Header0 || !Header1 || !Latch0 || !Latch1 ||
+        !Exit0 || !Exit1 || !InnerPreheader1 ||
+        !InnerExit0 || !InnerExit1) {
+        errs() << "Fusion nest fallita: blocchi necessari mancanti\n";
+        return false;
+    }
+
+    // Cerca le induction variable dei due loop esterni.
+    auto IVInfo0 = findSimpleIV(L0, SE);
+    auto IVInfo1 = findSimpleIV(L1, SE);
+
+    if (!IVInfo0 || !IVInfo1) {
+        errs() << "Fusion nest fallita: IV esterna non trovata\n";
+        return false;
+    }
+
+    // Gli step delle IV esterne devono coincidere.
+    if (IVInfo0->Step != IVInfo1->Step) {
+        errs() << "Fusion nest fallita: step IV esterna diverso\n";
+        return false;
+    }
+
+    // Le IV esterne devono partire dallo stesso valore.
+    bool SameStart =
+        (IVInfo0->Start == IVInfo1->Start) ||
+        SE.isKnownPredicate(ICmpInst::ICMP_EQ,
+                            IVInfo0->Start,
+                            IVInfo1->Start);
+
+    if (!SameStart) {
+        errs() << "Fusion nest fallita: start IV esterna diverso\n";
+        return false;
+    }
+
+    // Sostituisce gli usi della IV esterna di L1 con quella di L0.
+    replaceValueUsesInsideLoopBody(L1, IVInfo1->IV, IVInfo0->IV);
+
+    // Recupera i branch che verranno modificati.
+    BranchInst *Header0BI = dyn_cast<BranchInst>(Header0->getTerminator());
+    BranchInst *InnerExit0BI = dyn_cast<BranchInst>(InnerExit0->getTerminator());
+    BranchInst *InnerExit1BI = dyn_cast<BranchInst>(InnerExit1->getTerminator());
+
+    // Header0 deve essere il branch condizionale del loop esterno.
+    if (!Header0BI || !Header0BI->isConditional()) {
+        errs() << "Fusion nest fallita: header L0 non condizionale\n";
+        return false;
+    }
+
+    // L'uscita del primo inner loop deve essere un salto semplice.
+    if (!InnerExit0BI || !InnerExit0BI->isUnconditional()) {
+        errs() << "Fusion nest fallita: exit inner0 non incondizionale\n";
+        return false;
+    }
+
+    // Anche l'uscita del secondo inner loop deve essere un salto semplice.
+    if (!InnerExit1BI || !InnerExit1BI->isUnconditional()) {
+        errs() << "Fusion nest fallita: exit inner1 non incondizionale\n";
+        return false;
+    }
+
+    // Cambia l'uscita del loop esterno L0 verso l'uscita finale di L1.
+    bool ReplacedOuterExit = false;
+
+    for (unsigned S = 0; S < Header0BI->getNumSuccessors(); ++S) {
+        if (Header0BI->getSuccessor(S) == Exit0) {
+            Header0BI->setSuccessor(S, Exit1);
+            ReplacedOuterExit = true;
+            break;
+        }
+    }
+
+    if (!ReplacedOuterExit) {
+        errs() << "Fusion nest fallita: non trovo Exit0 in Header0\n";
+        return false;
+    }
+
+    // Dopo Inner0, invece di andare al latch esterno di L0,
+    // si entra nel preheader del secondo inner loop.
+    if (InnerExit0BI->getSuccessor(0) != Latch0) {
+        errs() << "Fusion nest fallita: InnerExit0 non va al latch esterno L0\n";
+        return false;
+    }
+
+    InnerExit0BI->setSuccessor(0, InnerPreheader1);
+
+    // Dopo Inner1, si torna al latch esterno di L0.
+    if (InnerExit1BI->getSuccessor(0) != Latch1) {
+        errs() << "Fusion nest fallita: InnerExit1 non va al latch esterno L1\n";
+        return false;
+    }
+
+    InnerExit1BI->setSuccessor(0, Latch0);
+
+    // Aggiorna eventuali PHI nei blocchi con predecessori cambiati.
+    replacePhiIncomingBlock(InnerPreheader1, Header1, InnerExit0);
+    replacePhiIncomingBlock(Latch0, InnerExit0, InnerExit1);
+    replacePhiIncomingBlock(Exit1, Header1, Header0);
+
+    errs() << "Fusion nest eseguita\n";
+    return true;
+}
+
+// Dispatcher: sceglie la trasformazione in base alla struttura dei loop.
+bool fuseLoops(Loop *L0,
+               Loop *L1,
+               LoopInfo &LI,
+               ScalarEvolution &SE) {
+    if (L0->getSubLoops().empty() && L1->getSubLoops().empty())
+        return fuseSimpleLoops(L0, L1, LI, SE);
+
+    if (isSimpleOneSubLoopNest(L0) && isSimpleOneSubLoopNest(L1))
+        return fuseOneSubLoopNests(L0, L1, LI, SE);
+
+    errs() << "Fusion fallita: tipo di loop non supportato\n";
+    return false;
+}
+
 
 struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
@@ -1172,102 +2028,122 @@ struct LoopFusionPass : public PassInfoMixin<LoopFusionPass> {
 
         errs() << "\nFunction: " << F.getName() << "\n";
 
-        std::vector<Loop *> TopLevelLoops = LI.getTopLevelLoops();
-
-        if (TopLevelLoops.size() < 2) {
-            errs() << "Meno di due top-level loop: niente da confrontare\n";
-            return PreservedAnalyses::all();
-        }
-
-        // Ordino i top-level loop in base alla posizione dell'header nella funzione.
         DenseMap<BasicBlock *, unsigned> BlockOrder;
         unsigned Order = 0;
 
         for (BasicBlock &BB : F)
             BlockOrder[&BB] = Order++;
 
-        std::sort(TopLevelLoops.begin(), TopLevelLoops.end(),
-                  [&](Loop *A, Loop *B) {
-                      return BlockOrder[A->getHeader()] <
-                             BlockOrder[B->getHeader()];
-                  });
+        SmallVector<SmallVector<Loop *, 8>, 8> LoopGroups;
+        collectSiblingLoopGroups(LI, LoopGroups);
 
-        for (size_t i = 0; i + 1 < TopLevelLoops.size(); i++) {
-            Loop *L0 = TopLevelLoops[i];
-            Loop *L1 = TopLevelLoops[i + 1];
+        if (LoopGroups.empty()) {
+            errs() << "Nessun gruppo di loop confrontabile\n";
+            return PreservedAnalyses::all();
+        }
 
-            errs() << "\nAnalizzo coppia di loop " << i
-                   << " e " << i + 1 << "\n";
+        /*
+         * Barton: si procede per nest level.
+         * Prima top-level, poi subloop fratelli.
+         */
+        for (auto &Group : LoopGroups) {
+            SmallVector<Loop *, 8> Candidates;
 
-            // 1. Adiacenza
-            if (areAdjacent(L0, L1, LI)) {
-                errs() << "Loop " << i << " e loop " << i + 1
-                       << " sono ADIACENTI\n";
-            } else {
-                errs() << "Loop " << i << " e loop " << i + 1
-                       << " NON sono adiacenti\n";
+            for (Loop *L : Group) {
+                if (!isEligibleLoop(L)) {
+                    errs() << "Loop scartato: non eleggibile\n";
+                    continue;
+                }
+
+                Candidates.push_back(L);
+            }
+
+            if (Candidates.size() < 2)
                 continue;
+
+            std::sort(Candidates.begin(), Candidates.end(),
+                      [&](Loop *A, Loop *B) {
+                          return BlockOrder[A->getHeader()] <
+                                 BlockOrder[B->getHeader()];
+                      });
+
+            SmallVector<SmallVector<Loop *, 8>, 8> CFESets;
+            buildCFESets(Candidates, CFESets, DT, PDT, BlockOrder);
+
+            for (auto &Set : CFESets) {
+                if (Set.size() < 2)
+                    continue;
+
+                for (size_t i = 0; i + 1 < Set.size(); ++i) {
+                    Loop *L0 = Set[i];
+                    Loop *L1 = Set[i + 1];
+
+                    errs() << "\nAnalizzo coppia di loop " << i
+                           << " e " << i + 1 << "\n";
+
+                    if (!haveSameParentLoop(L0, L1)) {
+                        errs() << "Loop NON fondibili: parent loop diverso\n";
+                        continue;
+                    }
+
+                    if (!areControlFlowEquivalent(L0, L1, DT, PDT)) {
+                        errs() << "Loop NON fondibili: non CFE\n";
+                        continue;
+                    }
+
+                    if (!haveSameTripCount(L0, L1, SE)) {
+                        errs() << "Loop NON fondibili: trip count diverso\n";
+                        continue;
+                    }
+
+                    errs() << "Loop hanno lo stesso trip count\n";
+
+                    if (!areAdjacent(L0, L1, LI)) {
+                        errs() << "Loop NON fondibili: non adiacenti\n";
+                        continue;
+                    }
+
+                    DependenceResult DepRes =
+                        checkDependences(L0, L1, LI, DI, SE);
+
+                    if (DepRes == DependenceResult::Negative) {
+                        errs() << "Loop NON fondibili: dipendenza negativa/backward\n";
+                        continue;
+                    }
+
+                    if (DepRes == DependenceResult::UnknownUnsafe) {
+                        errs() << "Loop NON fondibili: dipendenza non classificabile\n";
+                        continue;
+                    }
+
+                    if (!isProfitableToFuse(L0, L1)) {
+                        errs() << "Loop NON fondibili: non profittevole\n";
+                        continue;
+                    }
+
+                    errs() << "Loop fondibili: procedo con la trasformazione\n";
+
+                    if (fuseLoops(L0, L1, LI, SE)) {
+                        errs() << "Trasformazione completata\n";
+
+                        bool Removed = EliminateUnreachableBlocks(F);
+
+                        if (Removed)
+                            errs() << "Cleanup: blocchi non raggiungibili eliminati\n";
+                        else
+                            errs() << "Cleanup: nessun blocco non raggiungibile da eliminare\n";
+
+                        return PreservedAnalyses::none();
+                    }
+
+                    errs() << "Trasformazione non eseguita\n";
+                }
             }
-
-            // 2. Trip count
-            if (!haveSameTripCount(L0, L1, SE)) {
-                errs() << "Loop " << i << " e loop " << i + 1
-                       << " NON hanno lo stesso trip count\n";
-                continue;
-            }
-
-            errs() << "Loop " << i << " e loop " << i + 1
-                   << " hanno lo stesso trip count\n";
-
-            // 3. Control-flow equivalence
-            if (!areControlFlowEquivalent(L0, L1, DT, PDT)) {
-                errs() << "Loop " << i << " e loop " << i + 1
-                       << " NON sono control-flow equivalent\n";
-                continue;
-            }
-
-            errs() << "Loop " << i << " e loop " << i + 1
-                   << " sono control-flow equivalent\n";
-
-            // 4. Dependence analysis
-            DependenceResult DepRes = checkDependences(L0, L1, DI, SE);
-
-            if (DepRes == DependenceResult::Negative) {
-                errs() << "Loop NON fondibili: dipendenza negativa/backward\n";
-                continue;
-            }
-
-            if (DepRes == DependenceResult::UnknownUnsafe) {
-                errs() << "Loop NON fondibili: dipendenza non classificabile\n";
-                continue;
-            }
-
-            // Tutte le condizioni sono passate.
-            errs() << "Loop fondibili: posso procedere alla trasformazione\n";
-
-            errs() << "Loop fondibili: procedo con la trasformazione\n";
-
-            if (fuseLoops(L0, L1, LI, SE)) {
-                errs() << "Trasformazione completata\n";
-
-                bool Removed = EliminateUnreachableBlocks(F);
-
-                if (Removed)
-                    errs() << "Cleanup: blocchi non raggiungibili eliminati\n";
-                else
-                    errs() << "Cleanup: nessun blocco non raggiungibile da eliminare\n";
-
-                return PreservedAnalyses::none();
-            }
-
-            errs() << "Trasformazione non eseguita\n";
-continue;
         }
 
         return PreservedAnalyses::all();
     }
 };
-
 } // namespace
 
 llvm::PassPluginLibraryInfo getLoopFusionPassPluginInfo() {
