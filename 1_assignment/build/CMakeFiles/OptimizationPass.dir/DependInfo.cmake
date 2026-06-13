@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/samu/Laboratorio_Compilatori_2026/1_assignament/OptimizationPass.cpp" "CMakeFiles/OptimizationPass.dir/OptimizationPass.cpp.o" "gcc" "CMakeFiles/OptimizationPass.dir/OptimizationPass.cpp.o.d"
+  "/home/samu/Compilatori/1_assignment/OptimizationPass.cpp" "CMakeFiles/OptimizationPass.dir/OptimizationPass.cpp.o" "gcc" "CMakeFiles/OptimizationPass.dir/OptimizationPass.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

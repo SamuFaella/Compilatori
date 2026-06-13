@@ -1,23 +1,32 @@
-; ModuleID = 'test/test_Opt.ll'
+; ModuleID = 'test/test_Opt.m2r.ll'
 source_filename = "test/test_Opt.c"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"
 
 ; Function Attrs: noinline nounwind uwtable
 define dso_local i32 @main() #0 {
-  %1 = add nsw i32 42, 0
-  %2 = mul nsw i32 1, 42
-  %3 = mul nsw i32 42, 16
-  %4 = mul nsw i32 42, 15
-  %5 = sdiv i32 42, 8
-  %6 = add nsw i32 42, 1
-  %7 = sub nsw i32 %6, 1
-  %8 = add nsw i32 %1, %2
-  %9 = add nsw i32 %8, %3
-  %10 = add nsw i32 %9, %5
-  %11 = add nsw i32 %10, %7
-  %12 = add nsw i32 %11, %4
-  ret i32 %12
+  %1 = add nsw i32 42, 42
+  %2 = add nsw i32 %1, 672
+  %3 = add nsw i32 %2, 5
+  %4 = add nsw i32 %3, 42
+  %5 = add nsw i32 %4, 630
+  ret i32 %5
+}
+
+; Function Attrs: noinline nounwind uwtable
+define dso_local i32 @example(i32 noundef %0) #0 {
+  ret i32 %0
+}
+
+; Function Attrs: noinline nounwind uwtable
+define dso_local i32 @test_strength(i32 noundef %0) #0 {
+  %2 = shl i32 %0, 4
+  %3 = shl i32 %0, 4
+  %4 = sub i32 %3, %0
+  %5 = sdiv i32 %0, 8
+  %6 = add nsw i32 %2, %4
+  %7 = add nsw i32 %6, %5
+  ret i32 %7
 }
 
 attributes #0 = { noinline nounwind uwtable "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }

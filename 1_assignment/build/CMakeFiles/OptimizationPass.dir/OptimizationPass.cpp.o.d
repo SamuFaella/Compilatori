@@ -1,5 +1,5 @@
 CMakeFiles/OptimizationPass.dir/OptimizationPass.cpp.o: \
- /home/samu/Laboratorio_Compilatori_2026/1_assignament/OptimizationPass.cpp \
+ /home/samu/Compilatori/1_assignment/OptimizationPass.cpp \
  /usr/include/stdc-predef.h \
  /home/samu/LLVM-19.1.7-Linux-X64/include/llvm/IR/Function.h \
  /home/samu/LLVM-19.1.7-Linux-X64/include/llvm/ADT/DenseSet.h \

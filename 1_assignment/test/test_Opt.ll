@@ -51,6 +51,46 @@ define dso_local i32 @main() #0 {
   ret i32 %34
 }
 
+; Function Attrs: noinline nounwind uwtable
+define dso_local i32 @example(i32 noundef %0) #0 {
+  %2 = alloca i32, align 4
+  %3 = alloca i32, align 4
+  %4 = alloca i32, align 4
+  store i32 %0, ptr %2, align 4
+  %5 = load i32, ptr %2, align 4
+  %6 = add nsw i32 %5, 5
+  store i32 %6, ptr %3, align 4
+  %7 = load i32, ptr %3, align 4
+  %8 = sub nsw i32 %7, 5
+  store i32 %8, ptr %4, align 4
+  %9 = load i32, ptr %4, align 4
+  ret i32 %9
+}
+
+; Function Attrs: noinline nounwind uwtable
+define dso_local i32 @test_strength(i32 noundef %0) #0 {
+  %2 = alloca i32, align 4
+  %3 = alloca i32, align 4
+  %4 = alloca i32, align 4
+  %5 = alloca i32, align 4
+  store i32 %0, ptr %2, align 4
+  %6 = load i32, ptr %2, align 4
+  %7 = mul nsw i32 %6, 16
+  store i32 %7, ptr %3, align 4
+  %8 = load i32, ptr %2, align 4
+  %9 = mul nsw i32 %8, 15
+  store i32 %9, ptr %4, align 4
+  %10 = load i32, ptr %2, align 4
+  %11 = sdiv i32 %10, 8
+  store i32 %11, ptr %5, align 4
+  %12 = load i32, ptr %3, align 4
+  %13 = load i32, ptr %4, align 4
+  %14 = add nsw i32 %12, %13
+  %15 = load i32, ptr %5, align 4
+  %16 = add nsw i32 %14, %15
+  ret i32 %16
+}
+
 attributes #0 = { noinline nounwind uwtable "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
 
 !llvm.module.flags = !{!0, !1, !2, !3, !4}

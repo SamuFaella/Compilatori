@@ -45,30 +45,50 @@ struct OptimizationPass : public PassInfoMixin<OptimizationPass> {
                 continue;
             }
 
-            // 2. Strength Reduction
+            // 2. Strength Reduction per moltiplicazioni/divisioni con costanti
             ConstantInt *C;
-            if (match(I, m_Mul(m_Value(X), m_ConstantInt(C))) || match(I, m_Mul(m_ConstantInt(C), m_Value(X)))) {
-                uint64_t val = C->getZExtValue(); // Estrarre il valore numerico da una costante
 
+            // Riconosce moltiplicazioni del tipo:
+            // x * C oppure C * x
+            if (match(I, m_Mul(m_Value(X), m_ConstantInt(C))) || match(I, m_Mul(m_ConstantInt(C), m_Value(X)))) {
+                uint64_t val = C->getZExtValue(); // Estrae il valore della costante come intero unsigned a 64 bit
+
+                // Caso: x * 2^n  ==>  x << n
+                // Controlla che val sia diverso da 0 e sia una potenza di 2
                 if ((val & (val - 1)) == 0) {
-                    // Potenza di 2
+                    
                     errs() << "Strength Reduction Multiplication: " << val << " è potenza di 2 → SHL\n";
-                    unsigned n = Log2_64(val); // Calcola il logaritmo in base 2
-                    IRBuilder<> Builder(I); // Crea un IRBuilder per costruire nuove istruzioni, come ad esempio add,shl,mul,ecc..
-                    //CreateShl() --> Crea un'istruzione di shift a sinistra
-                    Value *NewVal = Builder.CreateShl(X, ConstantInt::get(X->getType(), n));
+
+                    // n = log2(val), cioè il numero di posizioni dello shift
+                    unsigned n = Log2_64(val); 
+                    // IRBuilder permette di inserire nuove istruzioni prima di I
+                    IRBuilder<> Builder(I);
+
+                    // Crea l'istruzione: x << n
+                    Value *NewVal =
+                        Builder.CreateShl(X, ConstantInt::get(X->getType(), n));
+
+                    // Sostituisce tutti gli usi della moltiplicazione con il nuovo valore
                     I->replaceAllUsesWith(NewVal);
+
+                    // Elimina la vecchia istruzione mul
                     I->eraseFromParent();
+
                     changed = true;
                     continue;
+
+                // Caso: x * (2^n - 1)  ==>  (x << n) - x
+                // Esempio: x * 15 = x * (16 - 1) = (x << 4) - x
                 } else if (((val + 1) & val) == 0) {
-                    // 2^n - 1
+                    
                     errs() << "Strength Reduction Multiplication: " << val << " è 2^n - 1 → (x << n) - x\n";
                     unsigned n = Log2_64(val + 1);
                     IRBuilder<> Builder(I);
-                    Value *Shift = Builder.CreateShl(X, ConstantInt::get(X->getType(), n));
-                    //CreateSub() --> Crea un'istruzione di sottrazione
-                    //Shift è il risultato di un'istruzione di shift a sinistra, che viene fatta sopra
+                    // Crea x << n
+                    Value *Shift =
+                        Builder.CreateShl(X, ConstantInt::get(X->getType(), n));
+
+                    // Crea (x << n) - x
                     Value *NewVal = Builder.CreateSub(Shift, X);
                     I->replaceAllUsesWith(NewVal);
                     I->eraseFromParent();
@@ -76,28 +96,59 @@ struct OptimizationPass : public PassInfoMixin<OptimizationPass> {
                     continue;
                 }
             }
+            // Strength Reduction per divisioni intere
+            // Gestisce divisioni per potenze di 2:
+            // udiv x, 2^n  ==>  lshr x, n
+            // sdiv x, 2^n  ==>  ashr x, n solo se x è sicuramente non negativo
             //getOpcode() --> Restituisce il codice operativo dell'istruzione, ovvero serve per identificare che tipo di istruzione è
             if (I->getOpcode() == Instruction::UDiv || I->getOpcode() == Instruction::SDiv) {
                 Value *X;
                 ConstantInt *C;
-                //m_BinOp() --> Restituisce un'istruzione binaria, in questo caso una divisione
+
+                // Riconosce una divisione binaria con secondo operando costante:
+                // x / C
                 if (match(I, m_BinOp(m_Value(X), m_ConstantInt(C)))) {
-                    uint64_t val = C->getZExtValue();
-                    //Controllo: divisore potenza di 2 e diverso da zero
+                    uint64_t val = C->getZExtValue(); //Estrae il divisore
+
+                     // La divisione viene ottimizzata solo se il divisore è una potenza di 2
                     if (val != 0 && (val & (val - 1)) == 0) {
+
+                        // n = log2(val), cioè lo shift equivalente alla divisione
                         unsigned n = Log2_64(val);
 
                         IRBuilder<> Builder(I);
+
+                        // Costante che indica di quante posizioni fare lo shift
                         Value *ShiftAmount = ConstantInt::get(X->getType(), n);
                         Value *NewVal = nullptr;
 
+                        // Divisione unsigned:
+                        // udiv x, 8  ==>  lshr x, 3
                         if (I->getOpcode() == Instruction::UDiv) {
                             errs() << "Strength Reduction UDiv: / " << val << " -> LShr " << n << "\n";
                             NewVal = Builder.CreateLShr(X, ShiftAmount);
                         }
 
+                        // Divisione signed:
+                        // sdiv x, 8 può diventare ashr x, 3 solo se x >= 0
                         else if (I->getOpcode() == Instruction::SDiv) {
-                            errs() << "Strength Reduction SDiv: / " << val << " -> AShr " << n << "\n";
+                            bool XIsNonNegative = false;
+
+                            // Caso semplice: il dividendo è una costante nota a compile-time
+                            if (auto *XC = dyn_cast<ConstantInt>(X)) {
+                                XIsNonNegative = XC->getSExtValue() >= 0;
+                            }
+
+                            // Se non posso dimostrare che x è non negativo, non ottimizzo
+                            if (!XIsNonNegative) {
+                                errs() << "Strength Reduction SDiv non applicata: "
+                                    << "non posso garantire che il dividendo sia >= 0\n";
+                                continue;
+                            }
+
+                            errs() << "Strength Reduction SDiv: / "
+                                << val << " -> AShr " << n << "\n";
+
                             NewVal = Builder.CreateAShr(X, ShiftAmount);
                         }
 
@@ -109,15 +160,40 @@ struct OptimizationPass : public PassInfoMixin<OptimizationPass> {
                 }
             }
 
-            //3 Caso -->  Multi-Instruction Optimization ---> a = b+C, c = a-C --> b=c
+            // 3. Multi-Instruction Optimization
+            // Riconosce sequenze di istruzioni che si annullano a vicenda:
+            //
+            // a = b + C
+            // c = a - C
+            //
+            // quindi:
+            // c = b
             if(I->getOpcode() == Instruction::Sub){
+
+                // Primo operando della sub, cioè il valore da cui si sottrae
                 Value *A = I->getOperand(0);
+
                 ConstantInt *C1;
+
+                // Riconosce una sottrazione del tipo:
+                // X - C1
                 if (match(I, m_Sub(m_Value(X), m_ConstantInt(C1)))) {
+
+                    // Controlla se X è il risultato di un'istruzione precedente
                     Instruction *Prev = dyn_cast<Instruction>(A);
+
+                    // Verifica che l'istruzione precedente sia una add
                     if (Prev && Prev->getOpcode() == Instruction::Add){
                         Value *B;
                         ConstantInt *C2;
+
+                        // Riconosce:
+                        // B + C2
+                        //
+                        // Se poi ho:
+                        // (B + C2) - C1
+                        //
+                        // e C1 == C2, allora il risultato è B
                         if (match(Prev, m_Add(m_Value(B), m_ConstantInt(C2))) && C1->getValue() == C2->getValue()) {
                             errs() << "Multi-Instruction Optimization: ";
                             I->print(errs());
@@ -125,7 +201,11 @@ struct OptimizationPass : public PassInfoMixin<OptimizationPass> {
                             errs() << "Sostituito con: ";
                             B->print(errs());
                             errs() << "\n";
+
+                            // Sostituisce la sub con il valore originale B
                             I->replaceAllUsesWith(B);
+
+                            // Elimina la sub
                             I->eraseFromParent();
                             changed = true;
                             continue;
@@ -133,6 +213,13 @@ struct OptimizationPass : public PassInfoMixin<OptimizationPass> {
                     }
                 }
             }
+            // Caso simmetrico della Multi-Instruction Optimization:
+            //
+            // a = b - C
+            // c = a + C
+            //
+            // quindi:
+            // c = b
             else if(I->getOpcode() == Instruction::Add){
                 Value *A = I->getOperand(0);
                 ConstantInt *C1;

@@ -1,4 +1,4 @@
-# Install script for directory: /home/samu/Laboratorio_Compilatori_2026/1_assignament
+# Install script for directory: /home/samu/Compilatori/1_assignment
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -50,5 +50,5 @@ endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
-file(WRITE "/home/samu/Laboratorio_Compilatori_2026/1_assignament/build/${CMAKE_INSTALL_MANIFEST}"
+file(WRITE "/home/samu/Compilatori/1_assignment/build/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
